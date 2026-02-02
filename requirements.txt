@@ -1,0 +1,3 @@
+# Table-Tennis-Fantasy backend
+# Simulation engine uses only stdlib; tests use pytest.
+pytest>=7.0.0
