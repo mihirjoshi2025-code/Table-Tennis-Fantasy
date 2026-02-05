@@ -1,0 +1,48 @@
+/* Reference palette: dark theme, charcoal cards, lime green primary, amber orange secondary, rounded corners */
+:root {
+  --bg-primary: #000000;
+  --bg-card: rgb(30, 30, 30);
+  --text-primary: #ffffff;
+  --text-secondary: rgb(170, 170, 170);
+  --accent-primary: rgb(128, 255, 0);
+  --accent-secondary: rgb(255, 178, 0);
+  --radius: 12px;
+  --radius-sm: 8px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, sans-serif;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  min-height: 100vh;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+a {
+  color: var(--accent-primary);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+button {
+  font-family: inherit;
+  cursor: pointer;
+  border: none;
+  border-radius: var(--radius);
+}
+
+input, select {
+  font-family: inherit;
+  border-radius: var(--radius-sm);
+}
