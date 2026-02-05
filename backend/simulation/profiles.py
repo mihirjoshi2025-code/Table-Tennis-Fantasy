@@ -31,7 +31,8 @@ class PlayerProfile:
     # Clutch: boost in pressure situations (deciding set, close score)
     clutch_modifier: float = 0.03
     # Rally length distribution: weights for short/medium/long
-    rally_length_dist: tuple[float, float, float] = (0.4, 0.4, 0.2)
+    # Default from real-life: 56% short (1-3), 34% medium (4-7), 10% long (8+) – Newgy/Samson Dubina
+    rally_length_dist: tuple[float, float, float] = (0.56, 0.34, 0.10)
     # How much fatigue affects this player (0 = no effect, 1 = full)
     fatigue_sensitivity: float = 0.5
     # Style: fraction of winners that are forehand / backhand / service
@@ -61,7 +62,7 @@ class PlayerProfile:
             error_curve=d.get("error_curve", {}),
             streak_bias=d.get("streak_bias", 0.02),
             clutch_modifier=d.get("clutch_modifier", 0.03),
-            rally_length_dist=tuple(d.get("rally_length_dist", [0.4, 0.4, 0.2])),
+            rally_length_dist=tuple(d.get("rally_length_dist", [0.56, 0.34, 0.10])),
             fatigue_sensitivity=d.get("fatigue_sensitivity", 0.5),
             style_mix=tuple(d.get("style_mix", [0.45, 0.35, 0.2])),
         )
@@ -114,7 +115,7 @@ def default_profile(player_id: str, version: str = "v1", elo_advantage: float = 
         error_curve={"short": 0.02, "medium": 0.04, "long": 0.08},
         streak_bias=0.02,
         clutch_modifier=0.03,
-        rally_length_dist=(0.4, 0.4, 0.2),
+        rally_length_dist=(0.56, 0.34, 0.10),
         fatigue_sensitivity=0.5,
         style_mix=(0.45, 0.35, 0.2),
     )

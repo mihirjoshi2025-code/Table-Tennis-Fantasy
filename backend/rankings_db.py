@@ -13,16 +13,16 @@ from typing import Any
 # ---------- Statistics sources (internet / research) ----------
 # [1] Serve analyses of elite European table tennis matches: serve directly won 11.6% of points;
 #     server scoring advantage; male players show larger serve advantage (Olympic analysis).
-# [2] ~80% of rallies end by the fifth stroke (short rallies dominate). Short 1-3, medium 4-7, long 8+.
+# [2] Samson Dubina/Newgy: 56% of points ≤3 shots, 34% on 4-7, 10% 8+ (professional tournament).
 # [3] Elite style: backhand stroke position ~55-58% in women (Olympic 2004-2021); serve winner ~11.6%.
 #     Style mix (forehand, backhand, service) default 0.45, 0.35, 0.20.
 # [4] Clutch / streak / fatigue: small modifiers from existing simulation engine defaults.
 
 DEFAULT_SERVE_MULTIPLIER_MEN = 1.05   # [1] male server advantage slightly higher
 DEFAULT_SERVE_MULTIPLIER_WOMEN = 1.04  # [1] female server advantage
-DEFAULT_RALLY_SHORT = 0.50   # [2] ~80% rallies end by 5th stroke → short-heavy
-DEFAULT_RALLY_MEDIUM = 0.35
-DEFAULT_RALLY_LONG = 0.15
+DEFAULT_RALLY_SHORT = 0.56   # [2] Newgy/Dubina rally statistics
+DEFAULT_RALLY_MEDIUM = 0.34
+DEFAULT_RALLY_LONG = 0.10
 DEFAULT_STYLE_FOREHAND = 0.45   # [3] elite forehand/backhand/service mix
 DEFAULT_STYLE_BACKHAND = 0.35
 DEFAULT_STYLE_SERVICE = 0.20
