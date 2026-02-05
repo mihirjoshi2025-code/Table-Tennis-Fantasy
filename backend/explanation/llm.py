@@ -60,35 +60,42 @@ def call_llm(messages: list[dict[str, str]]) -> tuple[str, list[str]]:
     if client is None:
         return (STUB_EXPLANATION, STUB_FACTS)
 
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=messages,
-        temperature=0,
-        response_format={
-            "type": "json_schema",
-            "json_schema": {
-                "name": "explanation_response",
-                "strict": True,
-                "schema": {
-                    "type": "object",
-                    "properties": {
-                        "explanation_text": {
-                            "type": "string",
-                            "description": "Short, grounded explanation based only on the provided data.",
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=messages,
+            temperature=0,
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "explanation_response",
+                    "strict": True,
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "explanation_text": {
+                                "type": "string",
+                                "description": "Short, grounded explanation based only on the provided data.",
+                            },
+                            "supporting_facts": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "List of specific facts or stats cited from the context.",
+                            },
                         },
-                        "supporting_facts": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "List of specific facts or stats cited from the context.",
-                        },
+                        "required": ["explanation_text", "supporting_facts"],
+                        "additionalProperties": False,
                     },
-                    "required": ["explanation_text", "supporting_facts"],
-                    "additionalProperties": False,
                 },
             },
-        },
-        max_tokens=1024,
-    )
+            max_tokens=1024,
+        )
+    except Exception as e:
+        return (
+            "The explanation service encountered an error. Use GET /analysis/match/{id} for deterministic analytics.",
+            [f"LLM request failed: {e!s}"],
+        )
+
     choice = response.choices[0]
     if not choice.message.content:
         return (
