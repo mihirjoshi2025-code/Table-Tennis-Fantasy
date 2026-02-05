@@ -8,7 +8,10 @@ import json
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .simulation.profiles import PlayerProfile, ProfileStore
 
 # ---------- Statistics sources (internet / research) ----------
 # [1] Serve analyses of elite European table tennis matches: serve directly won 11.6% of points;
@@ -251,7 +254,7 @@ def build_profile_from_row(
     row: PlayerRow,
     opponent_points: int,
     version: str = "v1",
-) -> "PlayerProfile":
+) -> PlayerProfile:
     """
     Build a simulation PlayerProfile from a DB row.
     baseline_point_win is derived from relative points (stronger player > 0.5).
@@ -299,7 +302,7 @@ def build_profile_store_for_match(
     player_a_id: str,
     player_b_id: str,
     version: str = "v1",
-) -> "ProfileStore":
+) -> ProfileStore:
     """
     Build a ProfileStore with profiles for both players, with baseline_point_win
     aligned to their relative points (for simulation engine).
