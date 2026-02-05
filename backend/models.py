@@ -42,10 +42,12 @@ class Team:
     A user's fantasy team. Contains multiple players via TeamPlayer.
     Immutable: id, user_id.
     Mutable: name.
+    gender: "men" | "women" — must match all selected players.
     """
     id: str
     user_id: str
     name: str
+    gender: str  # "men" | "women"
     created_at: datetime
 
     def to_dict(self) -> dict[str, Any]:
@@ -53,6 +55,7 @@ class Team:
             "id": self.id,
             "user_id": self.user_id,
             "name": self.name,
+            "gender": self.gender,
             "created_at": self.created_at.isoformat(),
         }
 

@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, AsyncGenerator, Generator
 
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 # Ensure project root on path
@@ -70,14 +71,27 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 # ---------- Request/Response models ----------
 
 
+# Team size limits for validation
+TEAM_MIN_PLAYERS = 1
+TEAM_MAX_PLAYERS = 10
+
+
 class CreateTeamRequest(BaseModel):
     user_id: str = Field(..., description="Placeholder user ID")
     name: str = Field(..., min_length=1, max_length=200)
+    gender: str = Field(..., description="Team gender: 'men' or 'women'")
     player_ids: list[str] = Field(..., min_length=1, description="Player IDs (from rankings)")
 
 
@@ -133,25 +147,39 @@ def get_players(
 def create_team(req: CreateTeamRequest) -> dict[str, Any]:
     """
     Create a fantasy team.
-    Validates that all player_ids exist in rankings.
+    Validates: team size, gender consistency, all player_ids exist in rankings.
     """
+    if req.gender not in ("men", "women"):
+        raise HTTPException(status_code=400, detail="gender must be 'men' or 'women'")
+    if not (TEAM_MIN_PLAYERS <= len(req.player_ids) <= TEAM_MAX_PLAYERS):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Team must have between {TEAM_MIN_PLAYERS} and {TEAM_MAX_PLAYERS} players",
+        )
     with db_conn() as conn:
-        # Validate players exist
+        # Validate players exist and match team gender
         for pid in req.player_ids:
-            if get_player(conn, pid) is None:
+            p = get_player(conn, pid)
+            if p is None:
                 raise HTTPException(status_code=400, detail=f"Player not found: {pid}")
+            if p.gender != req.gender:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Player {pid} has gender '{p.gender}'; team gender is '{req.gender}'",
+                )
         # Ensure user exists (placeholder: create if not)
         user_repo = UserRepository()
         user = user_repo.get(conn, req.user_id)
         if user is None:
             user = user_repo.create(conn, name=f"User {req.user_id[:8]}", id=req.user_id)
         team_repo = TeamRepository()
-        team = team_repo.create(conn, req.user_id, req.name, req.player_ids)
+        team = team_repo.create(conn, req.user_id, req.name, req.gender, req.player_ids)
         player_ids = team_repo.get_players(conn, team.id)
         return {
             "id": team.id,
             "user_id": team.user_id,
             "name": team.name,
+            "gender": team.gender,
             "player_ids": player_ids,
             "created_at": team.created_at.isoformat(),
         }
@@ -175,6 +203,7 @@ def get_team(team_id: str) -> dict[str, Any]:
             "id": team.id,
             "user_id": team.user_id,
             "name": team.name,
+            "gender": team.gender,
             "players": players,
             "created_at": team.created_at.isoformat(),
         }
@@ -334,7 +363,15 @@ def explain_match_endpoint(req: ExplainMatchRequest) -> ExplainResponse:
         match_repo = MatchRepository()
         if match_repo.get(conn, req.match_id) is None:
             raise HTTPException(status_code=404, detail="Match not found")
-        return explain_match(conn, req.match_id, req.user_query)
+        try:
+            return explain_match(conn, req.match_id, req.user_query)
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            raise HTTPException(
+                status_code=500,
+                detail=f"Explanation failed: {e!s}. Use GET /analysis/match/{req.match_id} for analytics.",
+            ) from e
 
 
 # ---------- Run with: uvicorn backend.api:app --reload ----------

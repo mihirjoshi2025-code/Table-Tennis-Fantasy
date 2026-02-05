@@ -61,6 +61,11 @@ def init_db(
         conn.executescript(_players_schema())
         # Fantasy tables (users, teams, team_players, matches)
         conn.executescript(all_schema_sql())
+        # Migration: add gender to teams if missing (existing DBs)
+        cur = conn.execute("PRAGMA table_info(teams)")
+        cols = [row[1] for row in cur.fetchall()]
+        if "gender" not in cols:
+            conn.execute("ALTER TABLE teams ADD COLUMN gender TEXT NOT NULL DEFAULT 'men'")
         conn.commit()
         if rankings_path:
             load_rankings_into_db(conn, Path(rankings_path))

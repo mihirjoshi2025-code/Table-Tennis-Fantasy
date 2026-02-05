@@ -32,8 +32,8 @@ def main() -> None:
         print(f"Using players: {[p['name'] for p in players[:4]]}")
 
         # Create two teams
-        t1 = client.post(f"{BASE}/teams", json={"user_id": "demo", "name": "Team A", "player_ids": ids[:2]})
-        t2 = client.post(f"{BASE}/teams", json={"user_id": "demo", "name": "Team B", "player_ids": ids[2:4]})
+        t1 = client.post(f"{BASE}/teams", json={"user_id": "demo", "name": "Team A", "gender": "men", "player_ids": ids[:2]})
+        t2 = client.post(f"{BASE}/teams", json={"user_id": "demo", "name": "Team B", "gender": "men", "player_ids": ids[2:4]})
         t1.raise_for_status()
         t2.raise_for_status()
         team_a_id = t1.json()["id"]
@@ -62,6 +62,12 @@ def main() -> None:
             f"{BASE}/explain/match",
             json={"match_id": match_id, "user_query": "Why did the winner win?"},
         )
+        if explain.status_code != 200:
+            try:
+                err = explain.json()
+                print("Server error response:", err)
+            except Exception:
+                print("Server error body:", explain.text[:500])
         explain.raise_for_status()
         out = explain.json()
         print("--- LLM explanation (POST /explain/match) ---")

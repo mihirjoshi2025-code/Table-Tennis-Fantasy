@@ -16,8 +16,9 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from backend.persistence import init_db, get_connection, UserRepository, TeamRepository, MatchRepository
 from backend.persistence.db import get_db_path, set_db_path
-from backend.rankings_db import list_players_by_gender, get_player, build_profile_store_for_match
+from backend.rankings_db import list_players_by_gender, build_profile_store_for_match
 from backend.scoring import aggregate_stats_from_events, compute_fantasy_score
+from backend.simulation.persistence import event_to_dict
 from backend.simulation.schemas import MatchConfig
 from backend.simulation.orchestrator import MatchOrchestrator, sets_to_win_match
 
@@ -44,8 +45,8 @@ def main() -> None:
         # 2. Create two teams
         players_men = list_players_by_gender(conn, "men", limit=10)
         player_ids = [p.id for p in players_men[:6]]
-        team_a = team_repo.create(conn, user_id, "Champions", player_ids[:3])
-        team_b = team_repo.create(conn, user_id, "Underdogs", player_ids[3:6])
+        team_a = team_repo.create(conn, user_id, "Champions", "men", player_ids[:3])
+        team_b = team_repo.create(conn, user_id, "Underdogs", "men", player_ids[3:6])
         print(f"Created team A: {team_a.name} (id={team_a.id})")
         print(f"Created team B: {team_b.name} (id={team_b.id})")
 
@@ -72,16 +73,8 @@ def main() -> None:
         sets_a, sets_b = last.set_scores_after[0], last.set_scores_after[1]
         winner_id = player_a_id if sets_a >= sets_needed else player_b_id
 
-        def _ev_to_dict(e):
-            return {
-                "point_index": e.point_index,
-                "set_index": e.set_index,
-                "score_after": list(e.score_after),
-                "set_scores_after": list(e.set_scores_after),
-                "outcome": {"winner_id": e.outcome.winner_id, "shot_type": e.outcome.shot_type},
-            }
-
-        events_json = json.dumps([_ev_to_dict(e) for e in events])
+        # Serialize events for storage (contract: simulation.persistence.event_to_dict)
+        events_json = json.dumps([event_to_dict(e) for e in events])
 
         match = match_repo.create(
             conn,

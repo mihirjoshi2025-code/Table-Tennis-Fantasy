@@ -73,12 +73,13 @@ def test_post_teams(client):
     ids = [p["id"] for p in players[:3]]
     resp = client.post(
         "/teams",
-        json={"user_id": "test-user-1", "name": "Team Alpha", "player_ids": ids},
+        json={"user_id": "test-user-1", "name": "Team Alpha", "gender": "men", "player_ids": ids},
     )
     assert resp.status_code == 200
     data = resp.json()
     assert data["name"] == "Team Alpha"
     assert data["user_id"] == "test-user-1"
+    assert data["gender"] == "men"
     assert data["player_ids"] == ids
     assert "id" in data
 
@@ -87,7 +88,7 @@ def test_get_team(client):
     """GET /teams/{id} returns team with player details."""
     resp = client.get("/players?gender=men&limit=3")
     ids = [p["id"] for p in resp.json()["players"][:3]]
-    create = client.post("/teams", json={"user_id": "u1", "name": "T1", "player_ids": ids})
+    create = client.post("/teams", json={"user_id": "u1", "name": "T1", "gender": "men", "player_ids": ids})
     tid = create.json()["id"]
     resp = client.get(f"/teams/{tid}")
     assert resp.status_code == 200
@@ -102,7 +103,7 @@ def test_post_teams_invalid_player(client):
     """POST /teams with unknown player returns 400."""
     resp = client.post(
         "/teams",
-        json={"user_id": "u1", "name": "T1", "player_ids": ["nonexistent-player-id"]},
+        json={"user_id": "u1", "name": "T1", "gender": "men", "player_ids": ["nonexistent-player-id"]},
     )
     assert resp.status_code == 400
 
@@ -111,8 +112,8 @@ def test_simulate_match(client):
     """POST /simulate/match runs simulation and persists result."""
     resp = client.get("/players?gender=men&limit=5")
     ids = [p["id"] for p in resp.json()["players"][:4]]
-    t1 = client.post("/teams", json={"user_id": "u1", "name": "T1", "player_ids": [ids[0], ids[1]]})
-    t2 = client.post("/teams", json={"user_id": "u2", "name": "T2", "player_ids": [ids[2], ids[3]]})
+    t1 = client.post("/teams", json={"user_id": "u1", "name": "T1", "gender": "men", "player_ids": [ids[0], ids[1]]})
+    t2 = client.post("/teams", json={"user_id": "u2", "name": "T2", "gender": "men", "player_ids": [ids[2], ids[3]]})
     tid1, tid2 = t1.json()["id"], t2.json()["id"]
     resp = client.post(
         "/simulate/match",
@@ -131,8 +132,8 @@ def test_get_match(client):
     """GET /matches/{id} returns persisted match."""
     resp = client.get("/players?gender=women&limit=5")
     ids = [p["id"] for p in resp.json()["players"][:4]]
-    t1 = client.post("/teams", json={"user_id": "u1", "name": "T1", "player_ids": [ids[0], ids[1]]})
-    t2 = client.post("/teams", json={"user_id": "u2", "name": "T2", "player_ids": [ids[2], ids[3]]})
+    t1 = client.post("/teams", json={"user_id": "u1", "name": "T1", "gender": "women", "player_ids": [ids[0], ids[1]]})
+    t2 = client.post("/teams", json={"user_id": "u2", "name": "T2", "gender": "women", "player_ids": [ids[2], ids[3]]})
     sim = client.post("/simulate/match", json={"team_a_id": t1.json()["id"], "team_b_id": t2.json()["id"], "seed": 99})
     mid = sim.json()["id"]
     resp = client.get(f"/matches/{mid}")
@@ -154,8 +155,8 @@ def test_vertical_slice(client):
     resp = client.get("/players?gender=men&limit=10")
     players = resp.json()["players"]
     ids = [p["id"] for p in players[:6]]
-    team_a = client.post("/teams", json={"user_id": "slice-user", "name": "Champions", "player_ids": ids[:3]})
-    team_b = client.post("/teams", json={"user_id": "slice-user", "name": "Underdogs", "player_ids": ids[3:6]})
+    team_a = client.post("/teams", json={"user_id": "slice-user", "name": "Champions", "gender": "men", "player_ids": ids[:3]})
+    team_b = client.post("/teams", json={"user_id": "slice-user", "name": "Underdogs", "gender": "men", "player_ids": ids[3:6]})
     assert team_a.status_code == 200
     assert team_b.status_code == 200
     aid, bid = team_a.json()["id"], team_b.json()["id"]
@@ -177,8 +178,8 @@ def test_get_analysis_match(client):
     """GET /analysis/match/{id} returns deterministic analytics."""
     resp = client.get("/players?gender=men&limit=4")
     ids = [p["id"] for p in resp.json()["players"][:4]]
-    t1 = client.post("/teams", json={"user_id": "u1", "name": "T1", "player_ids": [ids[0], ids[1]]})
-    t2 = client.post("/teams", json={"user_id": "u2", "name": "T2", "player_ids": [ids[2], ids[3]]})
+    t1 = client.post("/teams", json={"user_id": "u1", "name": "T1", "gender": "men", "player_ids": [ids[0], ids[1]]})
+    t2 = client.post("/teams", json={"user_id": "u2", "name": "T2", "gender": "men", "player_ids": [ids[2], ids[3]]})
     sim = client.post("/simulate/match", json={"team_a_id": t1.json()["id"], "team_b_id": t2.json()["id"], "seed": 77})
     mid = sim.json()["id"]
     resp = client.get(f"/analysis/match/{mid}")
@@ -208,8 +209,8 @@ def test_explain_match_stub_when_no_api_key(client):
     """POST /explain/match returns 200 with stub response when OPENAI_API_KEY is not set."""
     resp = client.get("/players?gender=men&limit=4")
     ids = [p["id"] for p in resp.json()["players"][:4]]
-    t1 = client.post("/teams", json={"user_id": "u1", "name": "T1", "player_ids": [ids[0], ids[1]]})
-    t2 = client.post("/teams", json={"user_id": "u2", "name": "T2", "player_ids": [ids[2], ids[3]]})
+    t1 = client.post("/teams", json={"user_id": "u1", "name": "T1", "gender": "men", "player_ids": [ids[0], ids[1]]})
+    t2 = client.post("/teams", json={"user_id": "u2", "name": "T2", "gender": "men", "player_ids": [ids[2], ids[3]]})
     sim = client.post("/simulate/match", json={"team_a_id": t1.json()["id"], "team_b_id": t2.json()["id"], "seed": 1})
     mid = sim.json()["id"]
     with patch.dict("os.environ", {}, clear=True):
@@ -225,8 +226,8 @@ def test_explain_match_success(client):
     """POST /explain/match returns explanation_text and supporting_facts when LLM is mocked."""
     resp = client.get("/players?gender=men&limit=4")
     ids = [p["id"] for p in resp.json()["players"][:4]]
-    t1 = client.post("/teams", json={"user_id": "u1", "name": "T1", "player_ids": [ids[0], ids[1]]})
-    t2 = client.post("/teams", json={"user_id": "u2", "name": "T2", "player_ids": [ids[2], ids[3]]})
+    t1 = client.post("/teams", json={"user_id": "u1", "name": "T1", "gender": "men", "player_ids": [ids[0], ids[1]]})
+    t2 = client.post("/teams", json={"user_id": "u2", "name": "T2", "gender": "men", "player_ids": [ids[2], ids[3]]})
     sim = client.post("/simulate/match", json={"team_a_id": t1.json()["id"], "team_b_id": t2.json()["id"], "seed": 88})
     mid = sim.json()["id"]
     from backend.explanation import ExplainResponse

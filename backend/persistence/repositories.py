@@ -63,14 +63,15 @@ class TeamRepository:
         conn: sqlite3.Connection,
         user_id: str,
         name: str,
+        gender: str,
         player_ids: list[str],
         id: str | None = None,
     ) -> Team:
         tid = id or str(uuid.uuid4())
         now = datetime.utcnow().isoformat()
         conn.execute(
-            "INSERT INTO teams (id, user_id, name, created_at) VALUES (?, ?, ?, ?)",
-            (tid, user_id, name, now),
+            "INSERT INTO teams (id, user_id, name, gender, created_at) VALUES (?, ?, ?, ?, ?)",
+            (tid, user_id, name, gender, now),
         )
         for pos, pid in enumerate(player_ids, start=1):
             conn.execute(
@@ -78,11 +79,11 @@ class TeamRepository:
                 (tid, pid, pos),
             )
         conn.commit()
-        return Team(id=tid, user_id=user_id, name=name, created_at=datetime.fromisoformat(now))
+        return Team(id=tid, user_id=user_id, name=name, gender=gender, created_at=datetime.fromisoformat(now))
 
     def get(self, conn: sqlite3.Connection, team_id: str) -> Team | None:
         row = conn.execute(
-            "SELECT id, user_id, name, created_at FROM teams WHERE id = ?",
+            "SELECT id, user_id, name, gender, created_at FROM teams WHERE id = ?",
             (team_id,),
         ).fetchone()
         if row is None:
@@ -91,6 +92,7 @@ class TeamRepository:
             id=row["id"],
             user_id=row["user_id"],
             name=row["name"],
+            gender=row["gender"] if "gender" in row.keys() else "men",
             created_at=_parse_datetime(row["created_at"]),
         )
 
@@ -104,7 +106,7 @@ class TeamRepository:
 
     def list_by_user(self, conn: sqlite3.Connection, user_id: str) -> list[Team]:
         rows = conn.execute(
-            "SELECT id, user_id, name, created_at FROM teams WHERE user_id = ? ORDER BY created_at",
+            "SELECT id, user_id, name, gender, created_at FROM teams WHERE user_id = ? ORDER BY created_at",
             (user_id,),
         ).fetchall()
         return [
@@ -112,6 +114,7 @@ class TeamRepository:
                 id=r["id"],
                 user_id=r["user_id"],
                 name=r["name"],
+                gender=r["gender"] if "gender" in r.keys() else "men",
                 created_at=_parse_datetime(r["created_at"]),
             )
             for r in rows
