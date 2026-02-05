@@ -6,9 +6,9 @@ from __future__ import annotations
 
 import json
 import random
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
-from typing import Any, Generator
+from typing import Any, AsyncGenerator, Generator
 
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -53,11 +53,19 @@ def _ensure_db() -> None:
     init_db(db_path=get_db_path(), rankings_path=_rankings_path())
 
 
+# ---------- Lifespan ----------
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+    _ensure_db()
+    yield
+
+
 # ---------- FastAPI app ----------
 app = FastAPI(
     title="Table Tennis Fantasy API",
     description="Backend for fantasy teams and match simulation",
     version="0.1.0",
+    lifespan=lifespan,
 )
 
 
@@ -78,11 +86,6 @@ class SimulateMatchRequest(BaseModel):
 
 
 # ---------- Endpoints ----------
-
-
-@app.on_event("startup")
-def startup() -> None:
-    _ensure_db()
 
 
 @app.get("/players")

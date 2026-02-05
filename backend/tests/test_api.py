@@ -1,21 +1,30 @@
 """
 API integration tests.
 Uses TestClient to avoid starting a server.
+Requires: pip install httpx (for TestClient)
 """
 from __future__ import annotations
 
-import tempfile
 from pathlib import Path
 
 import pytest
-from fastapi.testclient import TestClient
+
+try:
+    from fastapi.testclient import TestClient
+    HAS_HTTPX = True
+except (ImportError, RuntimeError):
+    HAS_HTTPX = False
 
 # Ensure project root on path
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
+pytestmark = pytest.mark.skipif(not HAS_HTTPX, reason="httpx required for TestClient")
+
 from backend.api import app
-from backend.persistence.db import set_db_path, init_db, get_db_path
+from backend.persistence.db import set_db_path, init_db
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
 @pytest.fixture(autouse=True)
@@ -23,7 +32,7 @@ def isolated_db(tmp_path):
     """Use a temporary DB for each test."""
     db_path = tmp_path / "test.db"
     set_db_path(db_path)
-    init_db(db_path=db_path, rankings_path=Path(__file__).parent.parent.parent / "data" / "rankings.json")
+    init_db(db_path=db_path, rankings_path=PROJECT_ROOT / "data" / "rankings.json")
     yield db_path
 
 
