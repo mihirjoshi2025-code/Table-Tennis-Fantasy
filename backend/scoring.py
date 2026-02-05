@@ -278,8 +278,12 @@ def aggregate_stats_from_events(
             sa_after = ev.score_after
         else:
             sa_after = tuple(ev.get("score_after", (0, 0)))
-        streak_broken = getattr(ev, "streak_broken", False) or ev.get("streak_broken", False)
-        streak_continuing = getattr(ev, "streak_continuing", None) or ev.get("streak_continuing")
+        if hasattr(ev, "get") and callable(getattr(ev, "get", None)):
+            streak_broken = ev.get("streak_broken", False)
+            streak_continuing = ev.get("streak_continuing")
+        else:
+            streak_broken = getattr(ev, "streak_broken", False)
+            streak_continuing = getattr(ev, "streak_continuing", None)
 
         # New set: flush previous set and check comeback
         if si != current_set:
