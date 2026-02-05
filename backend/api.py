@@ -23,8 +23,11 @@ from backend.rankings_db import (
     build_profile_store_for_match,
 )
 from backend.persistence import get_connection, init_db, UserRepository, TeamRepository, MatchRepository
+from backend.analytics import compute_match_analytics as compute_match_analytics_fn
+from backend.explanation import ExplainResponse, explain_match
 from backend.persistence.db import get_db_path
 from backend.scoring import aggregate_stats_from_events, compute_fantasy_score
+from backend.simulation.persistence import event_to_dict
 from backend.simulation.schemas import MatchConfig
 from backend.simulation.orchestrator import MatchOrchestrator, sets_to_win_match
 
@@ -83,6 +86,11 @@ class SimulateMatchRequest(BaseModel):
     team_b_id: str
     seed: int | None = Field(default=None, description="RNG seed for reproducibility")
     best_of: int = Field(default=5, ge=3, le=5)
+
+
+class ExplainMatchRequest(BaseModel):
+    match_id: str = Field(..., description="Match ID to explain")
+    user_query: str | None = Field(default=None, description="Optional question, e.g. 'Why did Team A lose?'")
 
 
 # ---------- Endpoints ----------
@@ -225,25 +233,8 @@ def simulate_match(req: SimulateMatchRequest) -> dict[str, Any]:
         sets_a, sets_b = last.set_scores_after[0], last.set_scores_after[1]
         winner_id = player_a_id if sets_a >= sets_needed else player_b_id
 
-        # Serialize events for optional replay
-        def _ev_to_dict(e) -> dict:
-            return {
-                "match_id": e.match_id,
-                "point_index": e.point_index,
-                "set_index": e.set_index,
-                "score_before": list(e.score_before),
-                "score_after": list(e.score_after),
-                "set_scores_after": list(e.set_scores_after),
-                "outcome": {
-                    "winner_id": e.outcome.winner_id,
-                    "loser_id": e.outcome.loser_id,
-                    "shot_type": e.outcome.shot_type,
-                },
-                "rally_length": e.rally_length,
-                "streak_broken": e.streak_broken,
-            }
-
-        events_json = json.dumps([_ev_to_dict(e) for e in events])
+        # Serialize events for storage/replay (contract: simulation.persistence.event_to_dict)
+        events_json = json.dumps([event_to_dict(e) for e in events])
 
         # Persist match
         match = match_repo.create(
@@ -313,6 +304,37 @@ def get_match(match_id: str) -> dict[str, Any]:
         if match.events_json:
             out["events"] = json.loads(match.events_json)
         return out
+
+
+@app.get("/analysis/match/{match_id}")
+def get_analysis_match(match_id: str) -> dict[str, Any]:
+    """
+    Return deterministic, structured analytics for a match.
+    No language generation — stats and outcome only.
+    """
+    with db_conn() as conn:
+        match_repo = MatchRepository()
+        match = match_repo.get(conn, match_id)
+        if match is None:
+            raise HTTPException(status_code=404, detail="Match not found")
+        events = []
+        if match.events_json:
+            events = json.loads(match.events_json)
+        return compute_match_analytics_fn(match, events)
+
+
+@app.post("/explain/match", response_model=ExplainResponse)
+def explain_match_endpoint(req: ExplainMatchRequest) -> ExplainResponse:
+    """
+    Generate a read-only LLM explanation of why a match turned out the way it did.
+    Uses RAG pipeline: analytics + match summary + player context + rules → prompt → LLM.
+    If OPENAI_API_KEY is not set, returns a stub response (no 503). Never influences simulation or persistence.
+    """
+    with db_conn() as conn:
+        match_repo = MatchRepository()
+        if match_repo.get(conn, req.match_id) is None:
+            raise HTTPException(status_code=404, detail="Match not found")
+        return explain_match(conn, req.match_id, req.user_query)
 
 
 # ---------- Run with: uvicorn backend.api:app --reload ----------

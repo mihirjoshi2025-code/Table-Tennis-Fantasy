@@ -1,5 +1,7 @@
 # Backend Design: Table Tennis Fantasy
 
+**See [CONTRACTS.md](CONTRACTS.md) for frozen layer interfaces, inputs/outputs, invariants, and AI access boundaries.**
+
 ## Overview
 
 The backend foundation separates:
@@ -99,13 +101,15 @@ No business logic in repositories — only read/write.
 
 ### Endpoints
 
-| Method | Path              | Description                           |
-|--------|-------------------|---------------------------------------|
-| GET    | /players          | List players (optional gender filter) |
-| POST   | /teams            | Create team                           |
-| GET    | /teams/{id}       | Get team with players                 |
-| POST   | /simulate/match   | Simulate match, persist, return       |
-| GET    | /matches/{id}     | Get match by ID                       |
+| Method | Path                | Description                                      |
+|--------|---------------------|--------------------------------------------------|
+| GET    | /players            | List players (optional gender filter)            |
+| POST   | /teams              | Create team                                      |
+| GET    | /teams/{id}         | Get team with players                            |
+| POST   | /simulate/match     | Simulate match, persist, return                  |
+| GET    | /matches/{id}       | Get match by ID                                  |
+| GET    | /analysis/match/{id}| Deterministic analytics (stats, outcome, fantasy) |
+| POST   | /explain/match      | LLM explanation (match_id, optional user_query)  |
 
 ### Example Payloads
 
@@ -191,6 +195,7 @@ curl http://127.0.0.1:8000/players?gender=men
 
 - **AI analytics:** Match data (events_json, winner, sets) is persisted; AI can read without touching simulation.
 - **AI recaps:** Same — events are stored for replay/narration.
+- **Explanation feature (implemented):** `GET /analysis/match/{id}` returns deterministic analytics; `POST /explain/match` uses an agentic RAG pipeline (retrieval → prompt → LLM) to produce read-only explanations. Requires `OPENAI_API_KEY`. See CONTRACTS.md §7.
 - **Postgres:** Schema uses standard SQL; repositories use parameterized queries. Swap connection + init for Postgres driver.
 
 ---
@@ -203,3 +208,39 @@ uvicorn backend.api:app --reload --host 0.0.0.0 --port 8000
 ```
 
 OpenAPI docs: http://127.0.0.1:8000/docs
+
+---
+
+## Try the LLM explanation feature
+
+**Option A — Script (easiest)**
+
+```bash
+# Terminal 1: start the API
+export OPENAI_API_KEY=sk-your-key-here
+uvicorn backend.api:app --reload --port 8000
+
+# Terminal 2: create a match and get analytics + LLM explanation
+python3 scripts/try_explain.py
+```
+
+The script creates two teams, simulates a match, prints `GET /analysis/match/{id}` (deterministic analytics), then `POST /explain/match` (LLM summary). Without `OPENAI_API_KEY`, the explain call returns 503 and the script exits cleanly.
+
+**Option B — curl**
+
+With the API already running:
+
+```bash
+# Create teams (save the "id" from each response), then simulate:
+curl -s -X POST http://127.0.0.1:8000/simulate/match -H "Content-Type: application/json" \
+  -d '{"team_a_id":"<TEAM_A_ID>","team_b_id":"<TEAM_B_ID>","seed":42,"best_of":5}' -o /tmp/match.json
+
+MATCH_ID=$(python3 -c "import json; print(json.load(open('/tmp/match.json'))['id'])")
+
+# Deterministic analytics (no API key)
+curl -s "http://127.0.0.1:8000/analysis/match/$MATCH_ID" | python3 -m json.tool
+
+# LLM explanation (requires OPENAI_API_KEY)
+curl -s -X POST http://127.0.0.1:8000/explain/match -H "Content-Type: application/json" \
+  -d "{\"match_id\": \"$MATCH_ID\", \"user_query\": \"Why did the winner win?\"}" | python3 -m json.tool
+```

@@ -6,6 +6,7 @@ Requires: pip install httpx (for TestClient)
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -109,7 +110,7 @@ def test_post_teams_invalid_player(client):
 def test_simulate_match(client):
     """POST /simulate/match runs simulation and persists result."""
     resp = client.get("/players?gender=men&limit=5")
-    ids = [p["id"] for p in resp.json()["players"][:3]]
+    ids = [p["id"] for p in resp.json()["players"][:4]]
     t1 = client.post("/teams", json={"user_id": "u1", "name": "T1", "player_ids": [ids[0], ids[1]]})
     t2 = client.post("/teams", json={"user_id": "u2", "name": "T2", "player_ids": [ids[2], ids[3]]})
     tid1, tid2 = t1.json()["id"], t2.json()["id"]
@@ -170,3 +171,74 @@ def test_vertical_slice(client):
     assert retrieved["sets_a"] == match["sets_a"]
     assert retrieved["sets_b"] == match["sets_b"]
     assert len(retrieved["events"]) > 0
+
+
+def test_get_analysis_match(client):
+    """GET /analysis/match/{id} returns deterministic analytics."""
+    resp = client.get("/players?gender=men&limit=4")
+    ids = [p["id"] for p in resp.json()["players"][:4]]
+    t1 = client.post("/teams", json={"user_id": "u1", "name": "T1", "player_ids": [ids[0], ids[1]]})
+    t2 = client.post("/teams", json={"user_id": "u2", "name": "T2", "player_ids": [ids[2], ids[3]]})
+    sim = client.post("/simulate/match", json={"team_a_id": t1.json()["id"], "team_b_id": t2.json()["id"], "seed": 77})
+    mid = sim.json()["id"]
+    resp = client.get(f"/analysis/match/{mid}")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["match_id"] == mid
+    assert "outcome" in data
+    assert data["outcome"]["winner_id"] in (ids[0], ids[2])
+    assert "player_a_stats" in data
+    assert "player_b_stats" in data
+    assert "fantasy_scores" in data
+
+
+def test_get_analysis_match_not_found(client):
+    """GET /analysis/match/{id} returns 404 for unknown match."""
+    resp = client.get("/analysis/match/nonexistent-match-id")
+    assert resp.status_code == 404
+
+
+def test_explain_match_not_found(client):
+    """POST /explain/match returns 404 when match does not exist."""
+    resp = client.post("/explain/match", json={"match_id": "nonexistent-match-id"})
+    assert resp.status_code == 404
+
+
+def test_explain_match_stub_when_no_api_key(client):
+    """POST /explain/match returns 200 with stub response when OPENAI_API_KEY is not set."""
+    resp = client.get("/players?gender=men&limit=4")
+    ids = [p["id"] for p in resp.json()["players"][:4]]
+    t1 = client.post("/teams", json={"user_id": "u1", "name": "T1", "player_ids": [ids[0], ids[1]]})
+    t2 = client.post("/teams", json={"user_id": "u2", "name": "T2", "player_ids": [ids[2], ids[3]]})
+    sim = client.post("/simulate/match", json={"team_a_id": t1.json()["id"], "team_b_id": t2.json()["id"], "seed": 1})
+    mid = sim.json()["id"]
+    with patch.dict("os.environ", {}, clear=True):
+        resp = client.post("/explain/match", json={"match_id": mid})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "explanation_text" in data
+    assert "supporting_facts" in data
+    assert "OPENAI_API_KEY" in data["explanation_text"] or "Stub" in str(data.get("supporting_facts", []))
+
+
+def test_explain_match_success(client):
+    """POST /explain/match returns explanation_text and supporting_facts when LLM is mocked."""
+    resp = client.get("/players?gender=men&limit=4")
+    ids = [p["id"] for p in resp.json()["players"][:4]]
+    t1 = client.post("/teams", json={"user_id": "u1", "name": "T1", "player_ids": [ids[0], ids[1]]})
+    t2 = client.post("/teams", json={"user_id": "u2", "name": "T2", "player_ids": [ids[2], ids[3]]})
+    sim = client.post("/simulate/match", json={"team_a_id": t1.json()["id"], "team_b_id": t2.json()["id"], "seed": 88})
+    mid = sim.json()["id"]
+    from backend.explanation import ExplainResponse
+    with patch("backend.api.explain_match") as mock_explain:
+        mock_explain.return_value = ExplainResponse(
+            explanation_text="Team A won in 3 sets due to stronger service and fewer unforced errors.",
+            supporting_facts=["Winner won 3 sets.", "Net point differential favored winner."],
+        )
+        resp = client.post("/explain/match", json={"match_id": mid, "user_query": "Why did the winner win?"})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "explanation_text" in data
+    assert "supporting_facts" in data
+    assert isinstance(data["supporting_facts"], list)
+    assert len(data["explanation_text"]) > 0
