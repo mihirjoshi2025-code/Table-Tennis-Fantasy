@@ -34,6 +34,14 @@ DEFAULT_STREAK_BIAS = 0.02
 DEFAULT_FATIGUE_SENSITIVITY = 0.5
 
 
+def _salary_from_rank_and_points(rank: int, points: int) -> int:
+    """Phase 2: salary from rank and ITTF points. Higher rank + more points = higher salary (50–180)."""
+    rank_factor = (52 - min(rank, 52)) * 1.0
+    points_factor = points / 120.0
+    raw = 30 + rank_factor + points_factor
+    return max(50, min(180, round(raw)))
+
+
 @dataclass
 class PlayerRow:
     """One row from the players table (rankings + simulation stats)."""
@@ -43,6 +51,7 @@ class PlayerRow:
     gender: str  # "men" | "women"
     rank: int
     points: int
+    salary: int  # Phase 2: fantasy salary/worth for budget
     serve_multiplier: float
     rally_short_pct: float
     rally_medium_pct: float
@@ -62,6 +71,7 @@ class PlayerRow:
             self.gender,
             self.rank,
             self.points,
+            self.salary,
             self.serve_multiplier,
             self.rally_short_pct,
             self.rally_medium_pct,
@@ -89,6 +99,7 @@ def _players_schema() -> str:
         gender TEXT NOT NULL,
         rank INTEGER NOT NULL,
         points INTEGER NOT NULL,
+        salary INTEGER NOT NULL DEFAULT 100,
         serve_multiplier REAL NOT NULL,
         rally_short_pct REAL NOT NULL,
         rally_medium_pct REAL NOT NULL,
@@ -128,13 +139,15 @@ def load_rankings_into_db(conn: sqlite3.Connection, rankings_path: Path) -> None
     rows: list[PlayerRow] = []
     for r in men:
         name = r["name"]
+        rank = r["rank"]
         rows.append(PlayerRow(
             id=_slug(name),
             name=name,
             country=r["country"],
             gender="men",
-            rank=r["rank"],
+            rank=rank,
             points=r["points"],
+            salary=_salary_from_rank_and_points(rank, r["points"]),
             serve_multiplier=DEFAULT_SERVE_MULTIPLIER_MEN,
             rally_short_pct=DEFAULT_RALLY_SHORT,
             rally_medium_pct=DEFAULT_RALLY_MEDIUM,
@@ -148,13 +161,15 @@ def load_rankings_into_db(conn: sqlite3.Connection, rankings_path: Path) -> None
         ))
     for r in women:
         name = r["name"]
+        rank = r["rank"]
         rows.append(PlayerRow(
             id=_slug(name),
             name=name,
             country=r["country"],
             gender="women",
-            rank=r["rank"],
+            rank=rank,
             points=r["points"],
+            salary=_salary_from_rank_and_points(rank, r["points"]),
             serve_multiplier=DEFAULT_SERVE_MULTIPLIER_WOMEN,
             rally_short_pct=DEFAULT_RALLY_SHORT,
             rally_medium_pct=DEFAULT_RALLY_MEDIUM,
@@ -171,11 +186,11 @@ def load_rankings_into_db(conn: sqlite3.Connection, rankings_path: Path) -> None
     for row in rows:
         cur.execute(
             """INSERT OR REPLACE INTO players (
-                id, name, country, gender, rank, points,
+                id, name, country, gender, rank, points, salary,
                 serve_multiplier, rally_short_pct, rally_medium_pct, rally_long_pct,
                 style_forehand, style_backhand, style_service,
                 clutch_modifier, streak_bias, fatigue_sensitivity
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             row.to_tuple(),
         )
     conn.commit()
@@ -184,7 +199,7 @@ def load_rankings_into_db(conn: sqlite3.Connection, rankings_path: Path) -> None
 def get_player(conn: sqlite3.Connection, player_id: str) -> PlayerRow | None:
     """Fetch one player by id."""
     cur = conn.execute(
-        "SELECT id, name, country, gender, rank, points, "
+        "SELECT id, name, country, gender, rank, points, salary, "
         "serve_multiplier, rally_short_pct, rally_medium_pct, rally_long_pct, "
         "style_forehand, style_backhand, style_service, "
         "clutch_modifier, streak_bias, fatigue_sensitivity FROM players WHERE id = ?",
@@ -193,6 +208,9 @@ def get_player(conn: sqlite3.Connection, player_id: str) -> PlayerRow | None:
     row = cur.fetchone()
     if row is None:
         return None
+    n = len(row)
+    salary = row[6] if n > 6 else _salary_from_rank_and_points(row[4], row[5])
+    off = 1 if n > 6 else 0  # offset when salary column present
     return PlayerRow(
         id=row[0],
         name=row[1],
@@ -200,16 +218,17 @@ def get_player(conn: sqlite3.Connection, player_id: str) -> PlayerRow | None:
         gender=row[3],
         rank=row[4],
         points=row[5],
-        serve_multiplier=row[6],
-        rally_short_pct=row[7],
-        rally_medium_pct=row[8],
-        rally_long_pct=row[9],
-        style_forehand=row[10],
-        style_backhand=row[11],
-        style_service=row[12],
-        clutch_modifier=row[13],
-        streak_bias=row[14],
-        fatigue_sensitivity=row[15],
+        salary=salary,
+        serve_multiplier=row[6 + off],
+        rally_short_pct=row[7 + off],
+        rally_medium_pct=row[8 + off],
+        rally_long_pct=row[9 + off],
+        style_forehand=row[10 + off],
+        style_backhand=row[11 + off],
+        style_service=row[12 + off],
+        clutch_modifier=row[13 + off],
+        streak_bias=row[14 + off],
+        fatigue_sensitivity=row[15 + off],
     )
 
 
@@ -219,7 +238,7 @@ def list_players_by_gender(
     limit: int | None = None,
 ) -> list[PlayerRow]:
     """List players of one gender, ordered by rank."""
-    sql = "SELECT id, name, country, gender, rank, points, " \
+    sql = "SELECT id, name, country, gender, rank, points, salary, " \
           "serve_multiplier, rally_short_pct, rally_medium_pct, rally_long_pct, " \
           "style_forehand, style_backhand, style_service, " \
           "clutch_modifier, streak_bias, fatigue_sensitivity " \
@@ -229,6 +248,9 @@ def list_players_by_gender(
     cur = conn.execute(sql, (gender,))
     out = []
     for row in cur.fetchall():
+        n = len(row)
+        salary = row[6] if n > 6 else _salary_from_rank_and_points(row[4], row[5])
+        off = 1 if n > 6 else 0
         out.append(PlayerRow(
             id=row[0],
             name=row[1],
@@ -236,16 +258,17 @@ def list_players_by_gender(
             gender=row[3],
             rank=row[4],
             points=row[5],
-            serve_multiplier=row[6],
-            rally_short_pct=row[7],
-            rally_medium_pct=row[8],
-            rally_long_pct=row[9],
-            style_forehand=row[10],
-            style_backhand=row[11],
-            style_service=row[12],
-            clutch_modifier=row[13],
-            streak_bias=row[14],
-            fatigue_sensitivity=row[15],
+            salary=salary,
+            serve_multiplier=row[6 + off],
+            rally_short_pct=row[7 + off],
+            rally_medium_pct=row[8 + off],
+            rally_long_pct=row[9 + off],
+            style_forehand=row[10 + off],
+            style_backhand=row[11 + off],
+            style_service=row[12 + off],
+            clutch_modifier=row[13 + off],
+            streak_bias=row[14 + off],
+            fatigue_sensitivity=row[15 + off],
         ))
     return out
 

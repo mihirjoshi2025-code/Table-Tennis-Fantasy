@@ -5,7 +5,6 @@ Thin wrappers around domain logic and persistence.
 from __future__ import annotations
 
 import json
-import random
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from typing import Any, AsyncGenerator, Generator
@@ -30,11 +29,7 @@ def _truncate_password(s: str) -> str:
     if len(b) <= _MAX_PASSWORD_BYTES:
         return s
     return b[:_MAX_PASSWORD_BYTES].decode("utf-8", errors="replace")
-from backend.rankings_db import (
-    list_players_by_gender,
-    get_player,
-    build_profile_store_for_match,
-)
+from backend.rankings_db import list_players_by_gender, get_player
 from backend.persistence import (
     get_connection,
     init_db,
@@ -47,9 +42,11 @@ from backend.analytics import compute_match_analytics as compute_match_analytics
 from backend.explanation import ExplainResponse, explain_match
 from backend.persistence.db import get_db_path
 from backend.scoring import aggregate_stats_from_events, compute_fantasy_score
+from backend.services.simulation_service import run_team_match_simulation
 from backend.simulation.persistence import event_to_dict
 from backend.simulation.schemas import MatchConfig
 from backend.simulation.orchestrator import MatchOrchestrator, sets_to_win_match
+from backend.rankings_db import build_profile_store_for_match
 
 
 # ---------- Project root for data paths ----------
@@ -92,10 +89,16 @@ app = FastAPI(
 )
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://0.0.0.0:5173",
+        "http://[::1]:5173",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 
@@ -328,14 +331,19 @@ def create_team(
 
 
 @app.get("/teams")
-def list_teams(user_id: str | None = Query(None, description="Filter by owner (Phase 2: list user's teams)")) -> dict[str, Any]:
-    """List teams; if user_id provided, return only that user's teams."""
+def list_teams(
+    user_id: str | None = Query(None, description="Filter by owner (Phase 2: list user's teams)"),
+    gender: str | None = Query(None, description="Filter by gender: 'men' or 'women' (no cross-gender)"),
+) -> dict[str, Any]:
+    """List teams; if user_id provided, return only that user's teams. Optional gender filter."""
     with db_conn() as conn:
         team_repo = TeamRepository()
         if user_id:
             teams = team_repo.list_by_user(conn, user_id)
         else:
             teams = []
+        if gender and gender in ("men", "women"):
+            teams = [t for t in teams if t.gender == gender]
         return {
             "teams": [
                 {
@@ -351,11 +359,32 @@ def list_teams(user_id: str | None = Query(None, description="Filter by owner (P
         }
 
 
+def _last_match_points_for_player(
+    conn, match_repo: MatchRepository, player_id: str
+) -> float | None:
+    """Return fantasy points from this player's most recent match, or None if none/no events."""
+    match = match_repo.get_most_recent_for_player(conn, player_id)
+    if match is None or not match.events_json:
+        return None
+    events = json.loads(match.events_json)
+    stats_a, stats_b = aggregate_stats_from_events(
+        events,
+        winner_id=match.winner_id,
+        player_a_id=match.player_a_id,
+        player_b_id=match.player_b_id,
+        best_of=match.best_of,
+    )
+    if player_id == match.player_a_id:
+        return round(compute_fantasy_score(stats_a), 1)
+    return round(compute_fantasy_score(stats_b), 1)
+
+
 @app.get("/teams/{team_id}")
 def get_team(team_id: str) -> dict[str, Any]:
-    """Get a team by ID with its players."""
+    """Get a team by ID with its players and roster (with last_match_points per player)."""
     with db_conn() as conn:
         team_repo = TeamRepository()
+        match_repo = MatchRepository()
         team = team_repo.get(conn, team_id)
         if team is None:
             raise HTTPException(status_code=404, detail="Team not found")
@@ -377,29 +406,41 @@ def get_team(team_id: str) -> dict[str, Any]:
             out["budget"] = team.budget
         with_slots = team_repo.get_players_with_slots(conn, team_id)
         if with_slots and len(with_slots[0]) >= 2:
-            out["roster"] = [{"player_id": p, "slot": s, "is_captain": c} for p, s, c in with_slots]
+            out["roster"] = [
+                {
+                    "player_id": p,
+                    "slot": s,
+                    "is_captain": c,
+                    "last_match_points": _last_match_points_for_player(conn, match_repo, p),
+                }
+                for p, s, c in with_slots
+            ]
         return out
 
 
 @app.post("/simulate/team-match")
 def simulate_team_match(req: SimulateTeamMatchRequest) -> dict[str, Any]:
     """
-    Phase 2: Simulate team vs team. 7 active players each, captain gets +50% points.
-    Bench players do not score. Returns aggregate scores and match IDs.
+    Phase 2: Simulate team vs team. 7 active players each, captain +50% points.
+    Bench players do not score. Persists individual matches and aggregate team match; returns scores and highlights.
     """
+    import random
     seed_base = req.seed if req.seed is not None else random.randint(1, 2**31 - 1)
     with db_conn() as conn:
         team_repo = TeamRepository()
         match_repo = MatchRepository()
         team_match_repo = TeamMatchRepository()
-
         team_a = team_repo.get(conn, req.team_a_id)
         team_b = team_repo.get(conn, req.team_b_id)
         if team_a is None:
             raise HTTPException(status_code=404, detail=f"Team not found: {req.team_a_id}")
         if team_b is None:
             raise HTTPException(status_code=404, detail=f"Team not found: {req.team_b_id}")
-
+        if team_a.gender != team_b.gender:
+            raise HTTPException(
+                status_code=400,
+                detail="Teams must be the same gender (men vs men or women vs women).",
+            )
         active_a = team_repo.get_active_player_ids(conn, req.team_a_id)
         active_b = team_repo.get_active_player_ids(conn, req.team_b_id)
         if len(active_a) != TEAM_ACTIVE:
@@ -415,68 +456,52 @@ def simulate_team_match(req: SimulateTeamMatchRequest) -> dict[str, Any]:
         captain_a = team_repo.get_captain_id(conn, req.team_a_id)
         captain_b = team_repo.get_captain_id(conn, req.team_b_id)
 
-        score_a = 0.0
-        score_b = 0.0
-        match_ids: list[str] = []
-        highlights: list[dict[str, Any]] = []
+        result = run_team_match_simulation(
+            conn, req.team_a_id, req.team_b_id, seed=seed_base, best_of=req.best_of
+        )
+        score_a = result["home_score"]
+        score_b = result["away_score"]
+        slot_details = result["slot_details"]
+        highlights_raw = result["highlights"]
 
-        for i in range(TEAM_ACTIVE):
-            player_a_id = active_a[i]
-            player_b_id = active_b[i]
-            seed = seed_base + i
-            store = build_profile_store_for_match(conn, player_a_id, player_b_id)
-            match_id = f"sim-{req.team_a_id[:8]}-{req.team_b_id[:8]}-{seed}"
-            config = MatchConfig(
-                match_id=match_id,
-                player_a_id=player_a_id,
-                player_b_id=player_b_id,
-                seed=seed,
-                best_of=req.best_of,
-            )
-            orch = MatchOrchestrator(config, store)
-            events = list(orch.run())
-            if not events:
-                raise HTTPException(status_code=500, detail=f"Simulation produced no events for slot {i+1}")
-            sets_needed = sets_to_win_match(req.best_of)
-            last = events[-1]
-            sets_a, sets_b = last.set_scores_after[0], last.set_scores_after[1]
-            winner_id = player_a_id if sets_a >= sets_needed else player_b_id
-            stats_a, stats_b = aggregate_stats_from_events(
-                events, winner_id=winner_id,
-                player_a_id=player_a_id, player_b_id=player_b_id,
-                best_of=req.best_of,
-            )
-            fantasy_a = compute_fantasy_score(stats_a)
-            fantasy_b = compute_fantasy_score(stats_b)
-            # Captain bonus: +50%
-            if captain_a == player_a_id:
-                fantasy_a *= CAPTAIN_BONUS_MULTIPLIER
-            if captain_b == player_b_id:
-                fantasy_b *= CAPTAIN_BONUS_MULTIPLIER
-            score_a += fantasy_a
-            score_b += fantasy_b
-            events_json = json.dumps([event_to_dict(e) for e in events])
+        for slot in slot_details:
             match_repo.create(
-                conn, req.team_a_id, req.team_b_id,
-                player_a_id, player_b_id, winner_id,
-                sets_a, sets_b, req.best_of, seed, events_json=events_json, id=match_id,
+                conn,
+                req.team_a_id,
+                req.team_b_id,
+                slot["player_a_id"],
+                slot["player_b_id"],
+                slot["winner_id"],
+                slot["sets_a"],
+                slot["sets_b"],
+                req.best_of,
+                slot["seed"],
+                events_json=slot["events_json"],
+                id=slot["match_id"],
             )
-            match_ids.append(match_id)
-            highlights.append({
-                "slot": i + 1,
-                "player_a_id": player_a_id,
-                "player_b_id": player_b_id,
-                "points_a": round(fantasy_a, 1),
-                "points_b": round(fantasy_b, 1),
-                "winner_id": winner_id,
-                "match_id": match_id,
-            })
 
         tm_id = f"tm-{req.team_a_id[:8]}-{req.team_b_id[:8]}-{seed_base}"
         tm = team_match_repo.create(
             conn, req.team_a_id, req.team_b_id,
             score_a, score_b, captain_a, captain_b, id=tm_id,
         )
+
+        match_ids = [s["match_id"] for s in slot_details]
+        highlights = [
+            {
+                "slot": h["slot"],
+                "player_a_id": h["home_player_id"],
+                "player_b_id": h["away_player_id"],
+                "player_a_name": h["home_player_name"],
+                "player_b_name": h["away_player_name"],
+                "points_a": h["points_home"],
+                "points_b": h["points_away"],
+                "winner_id": h["winner_id"],
+                "match_id": slot_details[i]["match_id"],
+            }
+            for i, h in enumerate(highlights_raw)
+        ]
+
         return {
             "id": tm.id,
             "team_a_id": req.team_a_id,
@@ -494,33 +519,29 @@ def simulate_team_match(req: SimulateTeamMatchRequest) -> dict[str, Any]:
 @app.post("/simulate/match")
 def simulate_match(req: SimulateMatchRequest) -> dict[str, Any]:
     """
-    Simulate a match between two teams, persist the result, and return it.
-    Uses the first player from each team (by roster order).
+    Simulate a single match between two teams (first player from each team), persist and return.
+    Phase 2: supports manual trigger for Explain flow.
     """
+    import random
     seed = req.seed if req.seed is not None else random.randint(1, 2**31 - 1)
-
     with db_conn() as conn:
         team_repo = TeamRepository()
         match_repo = MatchRepository()
-
         team_a = team_repo.get(conn, req.team_a_id)
         team_b = team_repo.get(conn, req.team_b_id)
         if team_a is None:
             raise HTTPException(status_code=404, detail=f"Team not found: {req.team_a_id}")
         if team_b is None:
             raise HTTPException(status_code=404, detail=f"Team not found: {req.team_b_id}")
-
         player_ids_a = team_repo.get_players(conn, req.team_a_id)
         player_ids_b = team_repo.get_players(conn, req.team_b_id)
         if not player_ids_a:
             raise HTTPException(status_code=400, detail=f"Team {req.team_a_id} has no players")
         if not player_ids_b:
             raise HTTPException(status_code=400, detail=f"Team {req.team_b_id} has no players")
-
         player_a_id = player_ids_a[0]
         player_b_id = player_ids_b[0]
 
-        # Build profiles and run simulation (pure domain logic)
         store = build_profile_store_for_match(conn, player_a_id, player_b_id)
         match_id = f"sim-{req.team_a_id[:8]}-{req.team_b_id[:8]}-{seed}"
         config = MatchConfig(
@@ -531,23 +552,15 @@ def simulate_match(req: SimulateMatchRequest) -> dict[str, Any]:
             best_of=req.best_of,
         )
         orch = MatchOrchestrator(config, store)
-
-        events: list = []
-        for ev in orch.run():
-            events.append(ev)
-
+        events = list(orch.run())
         if not events:
             raise HTTPException(status_code=500, detail="Simulation produced no events")
-
         sets_needed = sets_to_win_match(req.best_of)
         last = events[-1]
         sets_a, sets_b = last.set_scores_after[0], last.set_scores_after[1]
         winner_id = player_a_id if sets_a >= sets_needed else player_b_id
-
-        # Serialize events for storage/replay (contract: simulation.persistence.event_to_dict)
         events_json = json.dumps([event_to_dict(e) for e in events])
 
-        # Persist match
         match = match_repo.create(
             conn,
             team_a_id=req.team_a_id,
@@ -562,8 +575,6 @@ def simulate_match(req: SimulateMatchRequest) -> dict[str, Any]:
             events_json=events_json,
             id=match_id,
         )
-
-        # Fantasy scores (optional enrichment)
         stats_a, stats_b = aggregate_stats_from_events(
             events, winner_id=winner_id,
             player_a_id=player_a_id, player_b_id=player_b_id,
@@ -571,7 +582,6 @@ def simulate_match(req: SimulateMatchRequest) -> dict[str, Any]:
         )
         fantasy_a = compute_fantasy_score(stats_a)
         fantasy_b = compute_fantasy_score(stats_b)
-
         return {
             "id": match.id,
             "team_a_id": match.team_a_id,
@@ -593,18 +603,22 @@ def simulate_match(req: SimulateMatchRequest) -> dict[str, Any]:
 
 @app.get("/matches/{match_id}")
 def get_match(match_id: str) -> dict[str, Any]:
-    """Get a match by ID."""
+    """Get a match by ID (with events and player names when available)."""
     with db_conn() as conn:
         match_repo = MatchRepository()
         match = match_repo.get(conn, match_id)
         if match is None:
             raise HTTPException(status_code=404, detail="Match not found")
+        p_a = get_player(conn, match.player_a_id)
+        p_b = get_player(conn, match.player_b_id)
         out: dict[str, Any] = {
             "id": match.id,
             "team_a_id": match.team_a_id,
             "team_b_id": match.team_b_id,
             "player_a_id": match.player_a_id,
             "player_b_id": match.player_b_id,
+            "player_a_name": p_a.name if p_a else match.player_a_id,
+            "player_b_name": p_b.name if p_b else match.player_b_id,
             "winner_id": match.winner_id,
             "sets_a": match.sets_a,
             "sets_b": match.sets_b,
@@ -621,7 +635,7 @@ def get_match(match_id: str) -> dict[str, Any]:
 def get_analysis_match(match_id: str) -> dict[str, Any]:
     """
     Return deterministic, structured analytics for a match.
-    No language generation — stats and outcome only.
+    No language generation — stats and outcome only. Includes rally/serve stats and player names.
     """
     with db_conn() as conn:
         match_repo = MatchRepository()
@@ -631,7 +645,12 @@ def get_analysis_match(match_id: str) -> dict[str, Any]:
         events = []
         if match.events_json:
             events = json.loads(match.events_json)
-        return compute_match_analytics_fn(match, events)
+        out = compute_match_analytics_fn(match, events)
+        p_a = get_player(conn, match.player_a_id)
+        p_b = get_player(conn, match.player_b_id)
+        out["player_a_name"] = p_a.name if p_a else match.player_a_id
+        out["player_b_name"] = p_b.name if p_b else match.player_b_id
+        return out
 
 
 @app.post("/explain/match", response_model=ExplainResponse)

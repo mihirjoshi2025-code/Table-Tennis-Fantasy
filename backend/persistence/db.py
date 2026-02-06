@@ -30,6 +30,15 @@ def _run_phase2_migrations(conn: sqlite3.Connection) -> None:
         conn.execute("UPDATE team_players SET slot = position WHERE slot IS NULL")
     if "is_captain" not in tpcols:
         conn.execute("ALTER TABLE team_players ADD COLUMN is_captain INTEGER NOT NULL DEFAULT 0")
+    # League-centric: add league_id to teams (one team per user per league)
+    cur = conn.execute("PRAGMA table_info(teams)")
+    tcols = [row[1] for row in cur.fetchall()]
+    if "league_id" not in tcols:
+        conn.execute("ALTER TABLE teams ADD COLUMN league_id TEXT REFERENCES leagues(id)")
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ix_teams_league_user ON teams(league_id, user_id) WHERE league_id IS NOT NULL"
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS ix_teams_league ON teams(league_id)")
 
 
 # Default DB path (project root / data / app.db)

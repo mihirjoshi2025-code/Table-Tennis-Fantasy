@@ -15,6 +15,66 @@ from backend.scoring import (
 )
 
 
+def _event_server(e: Any) -> str:
+    return e.get("server_id", "") if hasattr(e, "get") and callable(getattr(e, "get", None)) else getattr(e, "server_id", "")
+
+
+def _event_winner(e: Any) -> str:
+    o = e.get("outcome", {}) if hasattr(e, "get") and callable(getattr(e, "get", None)) else getattr(e, "outcome", None)
+    if hasattr(o, "winner_id"):
+        return o.winner_id
+    return (o or {}).get("winner_id", "")
+
+
+def _event_rally_length(e: Any) -> int:
+    if hasattr(e, "get") and callable(getattr(e, "get", None)):
+        return e.get("rally_length", 0)
+    return getattr(e, "rally_length", 0)
+
+
+def _compute_rally_and_serve_stats(
+    events: list[Any], player_a_id: str, player_b_id: str
+) -> dict[str, Any]:
+    """Derive rally and serve stats from events. No I/O."""
+    total_points = len(events)
+    if total_points == 0:
+        return {
+            "longest_rally": 0,
+            "avg_rally_length": 0.0,
+            "serve_win_pct_a": None,
+            "serve_win_pct_b": None,
+            "estimated_duration_seconds": 0,
+        }
+    rally_lengths = [_event_rally_length(e) for e in events]
+    longest_rally = max(rally_lengths)
+    avg_rally_length = round(sum(rally_lengths) / total_points, 1)
+    # Serve: points won when serving
+    serve_points_a = serve_won_a = 0
+    serve_points_b = serve_won_b = 0
+    for e in events:
+        server = _event_server(e)
+        winner = _event_winner(e)
+        if server == player_a_id:
+            serve_points_a += 1
+            if winner == player_a_id:
+                serve_won_a += 1
+        elif server == player_b_id:
+            serve_points_b += 1
+            if winner == player_b_id:
+                serve_won_b += 1
+    serve_win_pct_a = round(100 * serve_won_a / serve_points_a, 1) if serve_points_a else None
+    serve_win_pct_b = round(100 * serve_won_b / serve_points_b, 1) if serve_points_b else None
+    # ~25 seconds per point for table tennis (simulated)
+    estimated_duration_seconds = total_points * 25
+    return {
+        "longest_rally": longest_rally,
+        "avg_rally_length": avg_rally_length,
+        "serve_win_pct_a": serve_win_pct_a,
+        "serve_win_pct_b": serve_win_pct_b,
+        "estimated_duration_seconds": estimated_duration_seconds,
+    }
+
+
 def _stats_to_dict(stats: Any) -> dict[str, Any]:
     """Convert MatchStats to a JSON-friendly dict for API/context."""
     return {
@@ -64,6 +124,9 @@ def compute_match_analytics(match: Match, events: list[Any]) -> dict[str, Any]:
     )
     fantasy_a = compute_fantasy_score(stats_a)
     fantasy_b = compute_fantasy_score(stats_b)
+    rally_serve = _compute_rally_and_serve_stats(
+        events, match.player_a_id, match.player_b_id
+    )
     return {
         "match_id": match.id,
         "outcome": {
@@ -81,4 +144,9 @@ def compute_match_analytics(match: Match, events: list[Any]) -> dict[str, Any]:
             match.player_b_id: round(fantasy_b, 1),
         },
         "total_points_played": len(events),
+        "longest_rally": rally_serve["longest_rally"],
+        "avg_rally_length": rally_serve["avg_rally_length"],
+        "serve_win_pct_a": rally_serve["serve_win_pct_a"],
+        "serve_win_pct_b": rally_serve["serve_win_pct_b"],
+        "estimated_duration_seconds": rally_serve["estimated_duration_seconds"],
     }

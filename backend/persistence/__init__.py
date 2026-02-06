@@ -7,6 +7,11 @@ from .repositories import (
     UserRepository,
     TeamRepository,
     MatchRepository,
+    TeamMatchRepository,
+    LeagueRepository,
+    SeasonRepository,
+    WeekRepository,
+    LeagueMatchRepository,
 )
 
 __all__ = [
@@ -15,4 +20,9 @@ __all__ = [
     "UserRepository",
     "TeamRepository",
     "MatchRepository",
+    "TeamMatchRepository",
+    "LeagueRepository",
+    "SeasonRepository",
+    "WeekRepository",
+    "LeagueMatchRepository",
 ]
