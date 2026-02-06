@@ -9,11 +9,11 @@ Minimal Create Team + Team Summary flow. Uses the reference palette: dark backgr
    uvicorn backend.api:app --reload --port 8000
    ```
 
-2. From this directory:
+2. Start the frontend (from project root or from `frontend/`):
    ```bash
-   npm install
-   npm run dev
+   cd frontend && npm install && npm run dev
    ```
+   Or from inside `frontend/`: run `npm install` then `npm run dev`.
 
 3. Open http://localhost:5173 — Create Team page. After submitting, you are redirected to Team Summary.
 

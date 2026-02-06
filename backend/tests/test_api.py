@@ -243,3 +243,221 @@ def test_explain_match_success(client):
     assert "supporting_facts" in data
     assert isinstance(data["supporting_facts"], list)
     assert len(data["explanation_text"]) > 0
+
+
+# ---------- Phase 2: Auth, team constraints, team match simulation ----------
+
+
+def test_signup_and_login(client):
+    """POST /signup and POST /login return user_id, username, token."""
+    signup = client.post("/signup", json={"username": "phase2user", "password": "secret123"})
+    assert signup.status_code == 200
+    data = signup.json()
+    assert "user_id" in data
+    assert data["username"] == "phase2user"
+    assert "token" in data
+    assert len(data["token"]) > 0
+
+    login = client.post("/login", json={"username": "phase2user", "password": "secret123"})
+    assert login.status_code == 200
+    data2 = login.json()
+    assert data2["user_id"] == data["user_id"]
+    assert data2["username"] == "phase2user"
+    assert "token" in data2
+
+
+def test_login_wrong_password(client):
+    """POST /login with wrong password returns 401."""
+    client.post("/signup", json={"username": "u2", "password": "correct123"})
+    resp = client.post("/login", json={"username": "u2", "password": "wrong"})
+    assert resp.status_code == 401
+
+
+def test_post_teams_phase2_roster_budget(client):
+    """POST /teams with roster and budget creates Phase 2 team (7 active, 3 bench, one captain)."""
+    resp = client.get("/players?gender=men&limit=15")
+    assert resp.status_code == 200
+    players = resp.json()["players"]
+    assert len(players) >= 10
+    total_salary = 0
+    roster = []
+    for i, p in enumerate(players[:10]):
+        slot = i + 1
+        salary = p.get("salary", 100)
+        total_salary += salary
+        roster.append({"player_id": p["id"], "slot": slot, "is_captain": slot == 1})
+    budget = total_salary + 100
+    create = client.post(
+        "/teams",
+        json={
+            "name": "Phase2 Team",
+            "gender": "men",
+            "budget": budget,
+            "roster": roster,
+        },
+    )
+    assert create.status_code in (400, 401), "Expected 400/401 when no auth: need token or user_id for roster"
+    # With user_id in body (no token) it should work for testing
+    create2 = client.post(
+        "/teams",
+        json={
+            "user_id": "test-user-phase2",
+            "name": "Phase2 Team",
+            "gender": "men",
+            "budget": budget,
+            "roster": roster,
+        },
+    )
+    assert create2.status_code == 200, create2.text
+    data = create2.json()
+    assert data["name"] == "Phase2 Team"
+    assert data.get("budget") == budget
+    assert "roster" in data
+    assert len(data["roster"]) == 10
+    slots = [r["slot"] for r in data["roster"]]
+    assert set(slots) == set(range(1, 11))
+    captains = [r for r in data["roster"] if r.get("is_captain")]
+    assert len(captains) == 1
+    assert captains[0]["slot"] == 1
+
+
+def test_post_teams_phase2_budget_exceeded(client):
+    """POST /teams with roster total salary > budget returns 400."""
+    resp = client.get("/players?gender=women&limit=10")
+    players = resp.json()["players"]
+    roster = []
+    total = 0
+    for i, p in enumerate(players[:10]):
+        roster.append({"player_id": p["id"], "slot": i + 1, "is_captain": i == 0})
+        total += p.get("salary", 100)
+    budget = max(0, total - 50)
+    create = client.post(
+        "/teams",
+        json={
+            "user_id": "u",
+            "name": "Over",
+            "gender": "women",
+            "budget": budget,
+            "roster": roster,
+        },
+    )
+    assert create.status_code == 400
+    assert "salary" in create.json().get("detail", "").lower() or "budget" in create.json().get("detail", "").lower()
+
+
+def test_post_teams_phase2_captain_must_be_active(client):
+    """POST /teams with captain in slot 8 (bench) returns 400."""
+    resp = client.get("/players?gender=men&limit=10")
+    players = resp.json()["players"]
+    roster = []
+    total = 0
+    for i, p in enumerate(players[:10]):
+        roster.append({"player_id": p["id"], "slot": i + 1, "is_captain": i == 7})
+        total += p.get("salary", 100)
+    create = client.post(
+        "/teams",
+        json={
+            "user_id": "u",
+            "name": "BadCaptain",
+            "gender": "men",
+            "budget": total + 100,
+            "roster": roster,
+        },
+    )
+    assert create.status_code == 400
+    assert "captain" in create.json().get("detail", "").lower()
+
+
+def test_simulate_team_match(client):
+    """POST /simulate/team-match runs 7v7, returns score_a, score_b, highlights; captain bonus applied."""
+    resp = client.get("/players?gender=men&limit=15")
+    players = resp.json()["players"]
+    assert len(players) >= 10
+    total_salary = sum(p.get("salary", 100) for p in players[:10])
+    roster_a = [
+        {"player_id": players[i]["id"], "slot": i + 1, "is_captain": i == 0}
+        for i in range(10)
+    ]
+    roster_b = [
+        {"player_id": players[i + 5]["id"], "slot": i + 1, "is_captain": i == 1}
+        for i in range(10)
+    ]
+    # Ensure roster_b uses distinct players (if we have 15, indices 5..14 are 10 players)
+    if len(players) < 15:
+        roster_b = [{"player_id": p["id"], "slot": i + 1, "is_captain": i == 1} for i, p in enumerate(players[:10])]
+    budget = total_salary + 200
+    t1 = client.post(
+        "/teams",
+        json={"user_id": "ua", "name": "Team A", "gender": "men", "budget": budget, "roster": roster_a},
+    )
+    t2 = client.post(
+        "/teams",
+        json={"user_id": "ub", "name": "Team B", "gender": "men", "budget": budget, "roster": roster_b},
+    )
+    assert t1.status_code == 200
+    assert t2.status_code == 200
+    tid_a, tid_b = t1.json()["id"], t2.json()["id"]
+    sim = client.post(
+        "/simulate/team-match",
+        json={"team_a_id": tid_a, "team_b_id": tid_b, "seed": 999, "best_of": 5},
+    )
+    assert sim.status_code == 200, sim.text
+    data = sim.json()
+    assert "score_a" in data
+    assert "score_b" in data
+    assert "captain_a_id" in data
+    assert "captain_b_id" in data
+    assert "match_ids" in data
+    assert "highlights" in data
+    assert len(data["match_ids"]) == 7
+    assert len(data["highlights"]) == 7
+    # Only 7 active slots contribute; sum of points in highlights should match team scores (allow rounding)
+    sum_a = sum(h["points_a"] for h in data["highlights"])
+    sum_b = sum(h["points_b"] for h in data["highlights"])
+    assert abs(data["score_a"] - sum_a) < 0.2
+    assert abs(data["score_b"] - sum_b) < 0.2
+    # Captain IDs must be set (captain in slots 1–7)
+    assert data["captain_a_id"] == roster_a[0]["player_id"]
+    assert data["captain_b_id"] == roster_b[1]["player_id"]
+    # Bench (slots 8–10) do not appear in highlights; highlights are 7 slots
+    for h in data["highlights"]:
+        assert 1 <= h["slot"] <= 7
+
+
+def test_explain_match_from_team_match(client):
+    """After simulating a team match, Explain Match works with one of the returned match_ids."""
+    resp = client.get("/players?gender=men&limit=10")
+    players = resp.json()["players"]
+    roster = [
+        {"player_id": players[i]["id"], "slot": i + 1, "is_captain": i == 0}
+        for i in range(10)
+    ]
+    budget = sum(p.get("salary", 100) for p in players[:10]) + 100
+    t1 = client.post(
+        "/teams",
+        json={"user_id": "u1", "name": "TA", "gender": "men", "budget": budget, "roster": roster},
+    )
+    t2 = client.post(
+        "/teams",
+        json={"user_id": "u2", "name": "TB", "gender": "men", "budget": budget, "roster": roster},
+    )
+    assert t1.status_code == 200
+    assert t2.status_code == 200
+    sim = client.post(
+        "/simulate/team-match",
+        json={"team_a_id": t1.json()["id"], "team_b_id": t2.json()["id"], "seed": 111},
+    )
+    assert sim.status_code == 200
+    match_ids = sim.json()["match_ids"]
+    assert len(match_ids) == 7
+    with patch("backend.api.explain_match") as mock_explain:
+        from backend.explanation import ExplainResponse
+        mock_explain.return_value = ExplainResponse(
+            explanation_text="Team match was decided by captain performance.",
+            supporting_facts=["Captain bonus applied."],
+        )
+        resp = client.post("/explain/match", json={"match_id": match_ids[0]})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "explanation_text" in data
+    assert "supporting_facts" in data

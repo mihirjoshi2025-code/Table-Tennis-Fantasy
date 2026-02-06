@@ -10,20 +10,39 @@ from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from typing import Any, AsyncGenerator, Generator
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
 # Ensure project root on path
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from backend.auth import create_access_token, decode_token, hash_password, verify_password
+
+_MAX_PASSWORD_BYTES = 72
+
+
+def _truncate_password(s: str) -> str:
+    """Ensure password is at most 72 UTF-8 bytes for bcrypt compatibility."""
+    b = s.encode("utf-8")
+    if len(b) <= _MAX_PASSWORD_BYTES:
+        return s
+    return b[:_MAX_PASSWORD_BYTES].decode("utf-8", errors="replace")
 from backend.rankings_db import (
     list_players_by_gender,
     get_player,
     build_profile_store_for_match,
 )
-from backend.persistence import get_connection, init_db, UserRepository, TeamRepository, MatchRepository
+from backend.persistence import (
+    get_connection,
+    init_db,
+    UserRepository,
+    TeamRepository,
+    MatchRepository,
+    TeamMatchRepository,
+)
 from backend.analytics import compute_match_analytics as compute_match_analytics_fn
 from backend.explanation import ExplainResponse, explain_match
 from backend.persistence.db import get_db_path
@@ -86,13 +105,38 @@ app.add_middleware(
 # Team size limits for validation
 TEAM_MIN_PLAYERS = 1
 TEAM_MAX_PLAYERS = 10
+# Phase 2
+TEAM_ACTIVE = 7
+TEAM_BENCH = 3
+TEAM_TOTAL = 10
+CAPTAIN_BONUS_MULTIPLIER = 1.5
+
+security = HTTPBearer(auto_error=False)
+
+
+class SignupRequest(BaseModel):
+    username: str = Field(..., min_length=1, max_length=100)
+    password: str = Field(..., min_length=6)
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+class RosterSlot(BaseModel):
+    player_id: str
+    slot: int = Field(..., ge=1, le=10)
+    is_captain: bool = False
 
 
 class CreateTeamRequest(BaseModel):
-    user_id: str = Field(..., description="Placeholder user ID")
+    user_id: str | None = Field(None, description="Phase 1: placeholder; Phase 2 use auth")
     name: str = Field(..., min_length=1, max_length=200)
     gender: str = Field(..., description="Team gender: 'men' or 'women'")
-    player_ids: list[str] = Field(..., min_length=1, description="Player IDs (from rankings)")
+    player_ids: list[str] | None = Field(None, description="Phase 1: player IDs")
+    budget: int | None = Field(None, description="Phase 2: max total salary")
+    roster: list[RosterSlot] | None = Field(None, description="Phase 2: 10 players, slot 1-7 active 8-10 bench, one captain in 1-7")
 
 
 class SimulateMatchRequest(BaseModel):
@@ -107,7 +151,47 @@ class ExplainMatchRequest(BaseModel):
     user_query: str | None = Field(default=None, description="Optional question, e.g. 'Why did Team A lose?'")
 
 
+class SimulateTeamMatchRequest(BaseModel):
+    team_a_id: str
+    team_b_id: str
+    seed: int | None = None
+    best_of: int = Field(default=5, ge=3, le=5)
+
+
+def _get_current_user_id(credentials: HTTPAuthorizationCredentials | None = Depends(security)) -> str | None:
+    """Phase 2: return user_id from JWT or None if no/invalid token."""
+    if credentials is None:
+        return None
+    return decode_token(credentials.credentials)
+
+
 # ---------- Endpoints ----------
+
+
+@app.post("/signup")
+def signup(req: SignupRequest) -> dict[str, Any]:
+    """Phase 2: create account. Passwords hashed, never stored plain."""
+    with db_conn() as conn:
+        user_repo = UserRepository()
+        if user_repo.get_by_username(conn, req.username):
+            raise HTTPException(status_code=400, detail="Username already taken")
+        user = user_repo.create_with_password(
+            conn, req.username, hash_password(_truncate_password(req.password)), name=req.username
+        )
+        token = create_access_token(user.id)
+        return {"user_id": user.id, "username": user.username, "token": token}
+
+
+@app.post("/login")
+def login(req: LoginRequest) -> dict[str, Any]:
+    """Phase 2: login. Returns JWT token."""
+    with db_conn() as conn:
+        user_repo = UserRepository()
+        user = user_repo.get_by_username(conn, req.username)
+        if user is None or not user.password_hash or not verify_password(_truncate_password(req.password), user.password_hash):
+            raise HTTPException(status_code=401, detail="Invalid username or password")
+        token = create_access_token(user.id)
+        return {"user_id": user.id, "username": user.username, "token": token}
 
 
 @app.get("/players")
@@ -137,6 +221,7 @@ def get_players(
                     "gender": r.gender,
                     "rank": r.rank,
                     "points": r.points,
+                    "salary": getattr(r, "salary", 100),
                 }
                 for r in rows
             ],
@@ -144,21 +229,78 @@ def get_players(
 
 
 @app.post("/teams")
-def create_team(req: CreateTeamRequest) -> dict[str, Any]:
+def create_team(
+    req: CreateTeamRequest,
+    user_id_from_token: str | None = Depends(_get_current_user_id),
+) -> dict[str, Any]:
     """
     Create a fantasy team.
-    Validates: team size, gender consistency, all player_ids exist in rankings.
+    Phase 1: user_id in body, player_ids. Phase 2: auth + budget + roster (10 players, captain, active/bench).
     """
     if req.gender not in ("men", "women"):
         raise HTTPException(status_code=400, detail="gender must be 'men' or 'women'")
-    if not (TEAM_MIN_PLAYERS <= len(req.player_ids) <= TEAM_MAX_PLAYERS):
-        raise HTTPException(
-            status_code=400,
-            detail=f"Team must have between {TEAM_MIN_PLAYERS} and {TEAM_MAX_PLAYERS} players",
-        )
+
     with db_conn() as conn:
-        # Validate players exist and match team gender
-        for pid in req.player_ids:
+        user_repo = UserRepository()
+        team_repo = TeamRepository()
+
+        # Phase 2: roster + budget
+        if req.roster is not None:
+            if req.budget is None:
+                raise HTTPException(status_code=400, detail="budget required when using roster")
+            uid = user_id_from_token or req.user_id
+            if not uid:
+                raise HTTPException(status_code=401, detail="Login required to create team (Phase 2)")
+            if len(req.roster) != TEAM_TOTAL:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Roster must have exactly {TEAM_TOTAL} players (7 active, 3 bench)",
+                )
+            slots = [r.slot for r in req.roster]
+            if set(slots) != set(range(1, TEAM_TOTAL + 1)):
+                raise HTTPException(status_code=400, detail="Slots must be 1-10 exactly once")
+            captains = [r for r in req.roster if r.is_captain]
+            if len(captains) != 1:
+                raise HTTPException(status_code=400, detail="Exactly one captain required")
+            if captains[0].slot > TEAM_ACTIVE:
+                raise HTTPException(status_code=400, detail="Captain must be in active slots (1-7)")
+            total_salary = 0
+            for r in req.roster:
+                p = get_player(conn, r.player_id)
+                if p is None:
+                    raise HTTPException(status_code=400, detail=f"Player not found: {r.player_id}")
+                if p.gender != req.gender:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Player {r.player_id} has gender '{p.gender}'; team gender is '{req.gender}'",
+                    )
+                total_salary += getattr(p, "salary", 100)
+            if total_salary > req.budget:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Total salary {total_salary} exceeds budget {req.budget}",
+                )
+            roster_tuples = [(r.player_id, r.slot, r.is_captain) for r in req.roster]
+            team = team_repo.create_phase2(conn, uid, req.name, req.gender, req.budget, roster_tuples)
+            with_slots = team_repo.get_players_with_slots(conn, team.id)
+            return {
+                "id": team.id,
+                "user_id": team.user_id,
+                "name": team.name,
+                "gender": team.gender,
+                "budget": team.budget,
+                "roster": [{"player_id": p, "slot": s, "is_captain": c} for p, s, c in with_slots],
+                "created_at": team.created_at.isoformat(),
+            }
+
+        # Phase 1: player_ids
+        player_ids = req.player_ids or []
+        if not (TEAM_MIN_PLAYERS <= len(player_ids) <= TEAM_MAX_PLAYERS):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Team must have between {TEAM_MIN_PLAYERS} and {TEAM_MAX_PLAYERS} players",
+            )
+        for pid in player_ids:
             p = get_player(conn, pid)
             if p is None:
                 raise HTTPException(status_code=400, detail=f"Player not found: {pid}")
@@ -167,21 +309,45 @@ def create_team(req: CreateTeamRequest) -> dict[str, Any]:
                     status_code=400,
                     detail=f"Player {pid} has gender '{p.gender}'; team gender is '{req.gender}'",
                 )
-        # Ensure user exists (placeholder: create if not)
-        user_repo = UserRepository()
-        user = user_repo.get(conn, req.user_id)
+        uid = req.user_id or user_id_from_token
+        if not uid:
+            raise HTTPException(status_code=400, detail="user_id required when not using auth")
+        user = user_repo.get(conn, uid)
         if user is None:
-            user = user_repo.create(conn, name=f"User {req.user_id[:8]}", id=req.user_id)
-        team_repo = TeamRepository()
-        team = team_repo.create(conn, req.user_id, req.name, req.gender, req.player_ids)
-        player_ids = team_repo.get_players(conn, team.id)
+            user = user_repo.create(conn, name=f"User {uid[:8]}", id=uid)
+        team = team_repo.create(conn, uid, req.name, req.gender, player_ids)
+        player_ids_out = team_repo.get_players(conn, team.id)
         return {
             "id": team.id,
             "user_id": team.user_id,
             "name": team.name,
             "gender": team.gender,
-            "player_ids": player_ids,
+            "player_ids": player_ids_out,
             "created_at": team.created_at.isoformat(),
+        }
+
+
+@app.get("/teams")
+def list_teams(user_id: str | None = Query(None, description="Filter by owner (Phase 2: list user's teams)")) -> dict[str, Any]:
+    """List teams; if user_id provided, return only that user's teams."""
+    with db_conn() as conn:
+        team_repo = TeamRepository()
+        if user_id:
+            teams = team_repo.list_by_user(conn, user_id)
+        else:
+            teams = []
+        return {
+            "teams": [
+                {
+                    "id": t.id,
+                    "user_id": t.user_id,
+                    "name": t.name,
+                    "gender": t.gender,
+                    "budget": t.budget,
+                    "created_at": t.created_at.isoformat(),
+                }
+                for t in teams
+            ],
         }
 
 
@@ -199,13 +365,129 @@ def get_team(team_id: str) -> dict[str, Any]:
         for pid in player_ids:
             p = get_player(conn, pid)
             players.append({"id": pid, "name": p.name, "country": p.country} if p else {"id": pid})
-        return {
+        out = {
             "id": team.id,
             "user_id": team.user_id,
             "name": team.name,
             "gender": team.gender,
             "players": players,
             "created_at": team.created_at.isoformat(),
+        }
+        if team.budget is not None:
+            out["budget"] = team.budget
+        with_slots = team_repo.get_players_with_slots(conn, team_id)
+        if with_slots and len(with_slots[0]) >= 2:
+            out["roster"] = [{"player_id": p, "slot": s, "is_captain": c} for p, s, c in with_slots]
+        return out
+
+
+@app.post("/simulate/team-match")
+def simulate_team_match(req: SimulateTeamMatchRequest) -> dict[str, Any]:
+    """
+    Phase 2: Simulate team vs team. 7 active players each, captain gets +50% points.
+    Bench players do not score. Returns aggregate scores and match IDs.
+    """
+    seed_base = req.seed if req.seed is not None else random.randint(1, 2**31 - 1)
+    with db_conn() as conn:
+        team_repo = TeamRepository()
+        match_repo = MatchRepository()
+        team_match_repo = TeamMatchRepository()
+
+        team_a = team_repo.get(conn, req.team_a_id)
+        team_b = team_repo.get(conn, req.team_b_id)
+        if team_a is None:
+            raise HTTPException(status_code=404, detail=f"Team not found: {req.team_a_id}")
+        if team_b is None:
+            raise HTTPException(status_code=404, detail=f"Team not found: {req.team_b_id}")
+
+        active_a = team_repo.get_active_player_ids(conn, req.team_a_id)
+        active_b = team_repo.get_active_player_ids(conn, req.team_b_id)
+        if len(active_a) != TEAM_ACTIVE:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Team A must have exactly {TEAM_ACTIVE} active players (slots 1-7)",
+            )
+        if len(active_b) != TEAM_ACTIVE:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Team B must have exactly {TEAM_ACTIVE} active players (slots 1-7)",
+            )
+        captain_a = team_repo.get_captain_id(conn, req.team_a_id)
+        captain_b = team_repo.get_captain_id(conn, req.team_b_id)
+
+        score_a = 0.0
+        score_b = 0.0
+        match_ids: list[str] = []
+        highlights: list[dict[str, Any]] = []
+
+        for i in range(TEAM_ACTIVE):
+            player_a_id = active_a[i]
+            player_b_id = active_b[i]
+            seed = seed_base + i
+            store = build_profile_store_for_match(conn, player_a_id, player_b_id)
+            match_id = f"sim-{req.team_a_id[:8]}-{req.team_b_id[:8]}-{seed}"
+            config = MatchConfig(
+                match_id=match_id,
+                player_a_id=player_a_id,
+                player_b_id=player_b_id,
+                seed=seed,
+                best_of=req.best_of,
+            )
+            orch = MatchOrchestrator(config, store)
+            events = list(orch.run())
+            if not events:
+                raise HTTPException(status_code=500, detail=f"Simulation produced no events for slot {i+1}")
+            sets_needed = sets_to_win_match(req.best_of)
+            last = events[-1]
+            sets_a, sets_b = last.set_scores_after[0], last.set_scores_after[1]
+            winner_id = player_a_id if sets_a >= sets_needed else player_b_id
+            stats_a, stats_b = aggregate_stats_from_events(
+                events, winner_id=winner_id,
+                player_a_id=player_a_id, player_b_id=player_b_id,
+                best_of=req.best_of,
+            )
+            fantasy_a = compute_fantasy_score(stats_a)
+            fantasy_b = compute_fantasy_score(stats_b)
+            # Captain bonus: +50%
+            if captain_a == player_a_id:
+                fantasy_a *= CAPTAIN_BONUS_MULTIPLIER
+            if captain_b == player_b_id:
+                fantasy_b *= CAPTAIN_BONUS_MULTIPLIER
+            score_a += fantasy_a
+            score_b += fantasy_b
+            events_json = json.dumps([event_to_dict(e) for e in events])
+            match_repo.create(
+                conn, req.team_a_id, req.team_b_id,
+                player_a_id, player_b_id, winner_id,
+                sets_a, sets_b, req.best_of, seed, events_json=events_json, id=match_id,
+            )
+            match_ids.append(match_id)
+            highlights.append({
+                "slot": i + 1,
+                "player_a_id": player_a_id,
+                "player_b_id": player_b_id,
+                "points_a": round(fantasy_a, 1),
+                "points_b": round(fantasy_b, 1),
+                "winner_id": winner_id,
+                "match_id": match_id,
+            })
+
+        tm_id = f"tm-{req.team_a_id[:8]}-{req.team_b_id[:8]}-{seed_base}"
+        tm = team_match_repo.create(
+            conn, req.team_a_id, req.team_b_id,
+            score_a, score_b, captain_a, captain_b, id=tm_id,
+        )
+        return {
+            "id": tm.id,
+            "team_a_id": req.team_a_id,
+            "team_b_id": req.team_b_id,
+            "score_a": round(score_a, 1),
+            "score_b": round(score_b, 1),
+            "captain_a_id": captain_a,
+            "captain_b_id": captain_b,
+            "match_ids": match_ids,
+            "highlights": highlights,
+            "created_at": tm.created_at.isoformat(),
         }
 
 
