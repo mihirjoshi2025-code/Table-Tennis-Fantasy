@@ -30,11 +30,15 @@ export interface Team {
   created_at: string;
 }
 
-export async function getPlayers(gender?: 'men' | 'women', limit = 50): Promise<Player[]> {
+export async function getPlayers(
+  gender?: 'men' | 'women',
+  limit = 50,
+  signal?: AbortSignal
+): Promise<Player[]> {
   const params = new URLSearchParams();
   if (gender) params.set('gender', gender);
   params.set('limit', String(limit));
-  const res = await fetch(`${API_BASE}/players?${params}`);
+  const res = await fetch(`${API_BASE}/players?${params}`, { signal });
   if (!res.ok) throw new Error(await res.text());
   const data = await res.json();
   return data.players;
@@ -52,8 +56,15 @@ export async function createTeam(payload: {
     body: JSON.stringify(payload),
   });
   if (!res.ok) {
-    const err = await res.json().catch(async () => ({ detail: await res.text() }));
-    throw new Error(typeof err.detail === 'string' ? err.detail : JSON.stringify(err.detail));
+    const body = await res.text();
+    let message: string;
+    try {
+      const parsed = JSON.parse(body);
+      message = typeof parsed.detail === 'string' ? parsed.detail : JSON.stringify(parsed.detail ?? body);
+    } catch {
+      message = body || `Request failed with status ${res.status}`;
+    }
+    throw new Error(message);
   }
   return res.json();
 }

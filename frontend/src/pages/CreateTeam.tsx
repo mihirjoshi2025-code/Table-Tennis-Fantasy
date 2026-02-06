@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { getPlayers, createTeam, type Player } from '../api';
 import '../App.css';
@@ -16,15 +16,33 @@ export default function CreateTeam() {
   const [loading, setLoading] = useState(false);
   const [loadingPlayers, setLoadingPlayers] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
+    abortControllerRef.current?.abort();
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+    const signal = controller.signal;
+
     setLoadingPlayers(true);
     setError(null);
-    getPlayers(gender, 50)
-      .then(setPlayers)
-      .catch((e) => setError(e.message))
-      .finally(() => setLoadingPlayers(false));
     setSelectedIds(new Set());
+
+    getPlayers(gender, 50, signal)
+      .then((list) => {
+        if (!signal.aborted) setPlayers(list);
+      })
+      .catch((e) => {
+        if (!signal.aborted && e.name !== 'AbortError') setError(e.message);
+      })
+      .finally(() => {
+        if (!signal.aborted) setLoadingPlayers(false);
+      });
+
+    return () => {
+      controller.abort();
+      abortControllerRef.current = null;
+    };
   }, [gender]);
 
   const togglePlayer = (id: string) => {
