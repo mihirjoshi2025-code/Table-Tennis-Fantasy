@@ -8,21 +8,24 @@ import json
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .simulation.profiles import PlayerProfile, ProfileStore
 
 # ---------- Statistics sources (internet / research) ----------
 # [1] Serve analyses of elite European table tennis matches: serve directly won 11.6% of points;
 #     server scoring advantage; male players show larger serve advantage (Olympic analysis).
-# [2] ~80% of rallies end by the fifth stroke (short rallies dominate). Short 1-3, medium 4-7, long 8+.
+# [2] Samson Dubina/Newgy: 56% of points ≤3 shots, 34% on 4-7, 10% 8+ (professional tournament).
 # [3] Elite style: backhand stroke position ~55-58% in women (Olympic 2004-2021); serve winner ~11.6%.
 #     Style mix (forehand, backhand, service) default 0.45, 0.35, 0.20.
 # [4] Clutch / streak / fatigue: small modifiers from existing simulation engine defaults.
 
 DEFAULT_SERVE_MULTIPLIER_MEN = 1.05   # [1] male server advantage slightly higher
 DEFAULT_SERVE_MULTIPLIER_WOMEN = 1.04  # [1] female server advantage
-DEFAULT_RALLY_SHORT = 0.50   # [2] ~80% rallies end by 5th stroke → short-heavy
-DEFAULT_RALLY_MEDIUM = 0.35
-DEFAULT_RALLY_LONG = 0.15
+DEFAULT_RALLY_SHORT = 0.56   # [2] Newgy/Dubina rally statistics
+DEFAULT_RALLY_MEDIUM = 0.34
+DEFAULT_RALLY_LONG = 0.10
 DEFAULT_STYLE_FOREHAND = 0.45   # [3] elite forehand/backhand/service mix
 DEFAULT_STYLE_BACKHAND = 0.35
 DEFAULT_STYLE_SERVICE = 0.20
@@ -251,7 +254,7 @@ def build_profile_from_row(
     row: PlayerRow,
     opponent_points: int,
     version: str = "v1",
-) -> "PlayerProfile":
+) -> PlayerProfile:
     """
     Build a simulation PlayerProfile from a DB row.
     baseline_point_win is derived from relative points (stronger player > 0.5).
@@ -299,7 +302,7 @@ def build_profile_store_for_match(
     player_a_id: str,
     player_b_id: str,
     version: str = "v1",
-) -> "ProfileStore":
+) -> ProfileStore:
     """
     Build a ProfileStore with profiles for both players, with baseline_point_win
     aligned to their relative points (for simulation engine).
