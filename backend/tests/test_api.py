@@ -486,3 +486,26 @@ def test_explain_match_from_team_match(client):
     data = resp.json()
     assert "explanation_text" in data
     assert "supporting_facts" in data
+
+
+def test_advise_roles_returns_200(client):
+    """POST /advise/roles returns 200 with recommendations and explanation (stub when no API key)."""
+    resp = client.post(
+        "/advise/roles",
+        json={"query": "Who should I assign as my Aggressor?", "gender": "men"},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "recommendations" in data
+    assert "explanation" in data
+    assert isinstance(data["recommendations"], list)
+
+
+def test_advise_roles_team_not_found(client):
+    """POST /advise/roles with invalid team_id returns 404."""
+    resp = client.post(
+        "/advise/roles",
+        json={"query": "Who should be Anchor?", "team_id": "nonexistent-team-id"},
+    )
+    assert resp.status_code == 404
+    assert "team" in resp.json().get("detail", "").lower()

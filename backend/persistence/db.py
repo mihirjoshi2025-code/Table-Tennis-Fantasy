@@ -30,15 +30,54 @@ def _run_phase2_migrations(conn: sqlite3.Connection) -> None:
         conn.execute("UPDATE team_players SET slot = position WHERE slot IS NULL")
     if "is_captain" not in tpcols:
         conn.execute("ALTER TABLE team_players ADD COLUMN is_captain INTEGER NOT NULL DEFAULT 0")
+    # Role system: one role per active player (slots 1-7), at most one per role per team
+    if "role" not in tpcols:
+        conn.execute("ALTER TABLE team_players ADD COLUMN role TEXT")
     # League-centric: add league_id to teams (one team per user per league)
     cur = conn.execute("PRAGMA table_info(teams)")
     tcols = [row[1] for row in cur.fetchall()]
     if "league_id" not in tcols:
         conn.execute("ALTER TABLE teams ADD COLUMN league_id TEXT REFERENCES leagues(id)")
-        conn.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS ix_teams_league_user ON teams(league_id, user_id) WHERE league_id IS NOT NULL"
-        )
-        conn.execute("CREATE INDEX IF NOT EXISTS ix_teams_league ON teams(league_id)")
+    # Create indexes on league_id for both newly migrated and fresh DBs (schema no longer creates them)
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS ix_teams_league_user ON teams(league_id, user_id) WHERE league_id IS NOT NULL"
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS ix_teams_league ON teams(league_id)")
+
+
+def _run_phase3_league_members(conn: sqlite3.Connection) -> None:
+    """Phase 3: league_members join table (league_id, user_id, team_id). One team per user per league."""
+    cur = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'league_members'"
+    )
+    if cur.fetchone() is not None:
+        return
+    from .schema import league_members_schema
+    conn.executescript(league_members_schema())
+
+
+def _run_phase_leagues_started_at(conn: sqlite3.Connection) -> None:
+    """Add started_at to leagues. Set when league is started (frozen); immutable after that."""
+    cur = conn.execute("PRAGMA table_info(leagues)")
+    cols = [row[1] for row in cur.fetchall()]
+    if "started_at" not in cols:
+        conn.execute("ALTER TABLE leagues ADD COLUMN started_at TEXT")
+
+
+def _run_phase_league_matches_started_at(conn: sqlite3.Connection) -> None:
+    """Add started_at to league_matches. Set when match goes live; source of truth for late join."""
+    cur = conn.execute("PRAGMA table_info(league_matches)")
+    cols = [row[1] for row in cur.fetchall()]
+    if "started_at" not in cols:
+        conn.execute("ALTER TABLE league_matches ADD COLUMN started_at TEXT")
+
+
+def _run_phase_league_matches_slot_data(conn: sqlite3.Connection) -> None:
+    """Add slot_data (JSON) to league_matches. Per-slot TT momentum, analytics, events for completed matches."""
+    cur = conn.execute("PRAGMA table_info(league_matches)")
+    cols = [row[1] for row in cur.fetchall()]
+    if "slot_data" not in cols:
+        conn.execute("ALTER TABLE league_matches ADD COLUMN slot_data TEXT")
 
 
 # Default DB path (project root / data / app.db)
@@ -104,6 +143,11 @@ def init_db(
             conn.execute("ALTER TABLE players ADD COLUMN salary INTEGER NOT NULL DEFAULT 100")
             conn.execute("UPDATE players SET salary = 70 + CASE WHEN 51 - rank > 80 THEN 80 WHEN 51 - rank < 0 THEN 0 ELSE 51 - rank END")
         _run_phase2_migrations(conn)
+        _run_phase3_league_members(conn)
+        _run_phase_leagues_started_at(conn)
+        _run_phase_league_matches_started_at(conn)
+        _run_phase_league_matches_slot_data(conn)
+        # Role system: team_players.role added in _run_phase2_migrations
         conn.commit()
         if rankings_path:
             load_rankings_into_db(conn, Path(rankings_path))

@@ -12,6 +12,7 @@ from typing import Any
 
 from backend.rankings_db import build_profile_store_for_match, get_player
 from backend.persistence.repositories import TeamRepository
+from backend.roles import parse_role, apply_role_to_fantasy_score, RoleContext
 from backend.scoring import aggregate_stats_from_events, compute_fantasy_score
 from backend.simulation.persistence import event_to_dict
 from backend.simulation.schemas import MatchConfig
@@ -54,6 +55,8 @@ def run_team_match_simulation(
 
     captain_home = team_repo.get_captain_id(conn, home_team_id)
     captain_away = team_repo.get_captain_id(conn, away_team_id)
+    roster_home = team_repo.get_active_roster_with_roles(conn, home_team_id)
+    roster_away = team_repo.get_active_roster_with_roles(conn, away_team_id)
 
     score_home = 0.0
     score_away = 0.0
@@ -63,6 +66,8 @@ def run_team_match_simulation(
     for i in range(TEAM_ACTIVE):
         player_h_id = active_home[i]
         player_a_id = active_away[i]
+        role_h = parse_role(roster_home[i][1]) if i < len(roster_home) else None
+        role_a = parse_role(roster_away[i][1]) if i < len(roster_away) else None
         slot_seed = seed_base + i
         match_id = f"sim-{home_team_id[:8]}-{away_team_id[:8]}-{slot_seed}"
         store = build_profile_store_for_match(conn, player_h_id, player_a_id)
@@ -87,8 +92,30 @@ def run_team_match_simulation(
             player_a_id=player_h_id, player_b_id=player_a_id,
             best_of=best_of,
         )
-        fantasy_h = compute_fantasy_score(stats_h)
-        fantasy_a = compute_fantasy_score(stats_a)
+        raw_fantasy_h = compute_fantasy_score(stats_h)
+        raw_fantasy_a = compute_fantasy_score(stats_a)
+
+        # Role handler: apply role effects before captain bonus (keeps simulation loop role-agnostic)
+        ctx_h = RoleContext(
+            slot_index=i,
+            total_slots=TEAM_ACTIVE,
+            is_winner=(winner_id == player_h_id),
+            team_side="home",
+            cumulative_team_score_before=score_home,
+            seed=slot_seed,
+        )
+        ctx_a = RoleContext(
+            slot_index=i,
+            total_slots=TEAM_ACTIVE,
+            is_winner=(winner_id == player_a_id),
+            team_side="away",
+            cumulative_team_score_before=score_away,
+            seed=slot_seed,
+        )
+        fantasy_h, log_h = apply_role_to_fantasy_score(raw_fantasy_h, player_h_id, role_h, ctx_h)
+        fantasy_a, log_a = apply_role_to_fantasy_score(raw_fantasy_a, player_a_id, role_a, ctx_a)
+        role_log_entries: list[dict[str, Any]] = [e.to_dict() for e in log_h + log_a]
+
         if captain_home == player_h_id:
             fantasy_h *= CAPTAIN_BONUS_MULTIPLIER
         if captain_away == player_a_id:
@@ -108,6 +135,7 @@ def run_team_match_simulation(
             "points_a": round(fantasy_h, 1),
             "points_b": round(fantasy_a, 1),
             "seed": slot_seed,
+            "role_log": role_log_entries,
         })
 
         p_h = get_player(conn, player_h_id)
@@ -121,6 +149,7 @@ def run_team_match_simulation(
             "points_home": round(fantasy_h, 1),
             "points_away": round(fantasy_a, 1),
             "winner_id": winner_id,
+            "role_log": role_log_entries,
         })
 
     winner_team_id: str | None

@@ -31,6 +31,7 @@ class WeekStatus(str, Enum):
 # ---------- League match (fixture) status ----------
 class LeagueMatchStatus(str, Enum):
     SCHEDULED = "scheduled"
+    LIVE = "live"
     COMPLETED = "completed"
 
 
@@ -64,12 +65,33 @@ class User:
 # here; use rankings_db.PlayerRow when reading from DB.
 
 
+# ---------- LeagueMember (join: league_id, user_id, team_id) ----------
+@dataclass
+class LeagueMember:
+    """
+    One user's membership in a league with one team. One team per user per league.
+    """
+    league_id: str
+    user_id: str
+    team_id: str
+    joined_at: datetime
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "league_id": self.league_id,
+            "user_id": self.user_id,
+            "team_id": self.team_id,
+            "joined_at": self.joined_at.isoformat(),
+        }
+
+
 # ---------- League ----------
 @dataclass
 class League:
     """
     Multiplayer competition container. Owns seasons and state.
-    Status: open → locked → active → completed.
+    Status: open (draft) → active → completed.
+    started_at set when league is frozen; no more teams or roster changes.
     """
     id: str
     name: str
@@ -77,9 +99,10 @@ class League:
     status: str  # LeagueStatus value
     max_teams: int
     created_at: datetime
+    started_at: datetime | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        d: dict[str, Any] = {
             "id": self.id,
             "name": self.name,
             "owner_id": self.owner_id,
@@ -87,6 +110,9 @@ class League:
             "max_teams": self.max_teams,
             "created_at": self.created_at.isoformat(),
         }
+        if self.started_at is not None:
+            d["started_at"] = self.started_at.isoformat()
+        return d
 
 
 # ---------- Season ----------

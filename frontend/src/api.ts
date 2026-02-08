@@ -92,10 +92,19 @@ export interface TeamPlayer {
   country?: string;
 }
 
+export interface RoleDefinition {
+  id: string;
+  name: string;
+  description: string;
+  modifier_summary: string;
+}
+
 export interface RosterSlot {
   player_id: string;
   slot: number;
   is_captain: boolean;
+  /** One of: anchor, aggressor, closer, wildcard, stabilizer. Only for slots 1-7; at most one per role per team. */
+  role?: string | null;
   /** Fantasy points from player's most recent match; null if none. */
   last_match_points?: number | null;
 }
@@ -184,6 +193,36 @@ export async function getTeam(teamId: string): Promise<Team> {
   return apiRequest<Team>(`/teams/${teamId}`);
 }
 
+export async function listRoles(): Promise<RoleDefinition[]> {
+  const data = await apiRequest<{ roles: RoleDefinition[] }>('/roles');
+  return data.roles;
+}
+
+export interface RoleRecommendation {
+  player_id: string;
+  player_name: string;
+  suggested_role: string;
+  why_fit: string;
+  risk: string;
+}
+
+export interface RoleAdvisorResponse {
+  recommendations: RoleRecommendation[];
+  explanation: string;
+  tradeoffs?: string | null;
+}
+
+export async function adviseRoles(params: {
+  query: string;
+  team_id?: string | null;
+  gender?: 'men' | 'women' | null;
+}): Promise<RoleAdvisorResponse> {
+  const body: Record<string, string> = { query: params.query };
+  if (params.team_id) body.team_id = params.team_id;
+  if (params.gender) body.gender = params.gender;
+  return apiRequest<RoleAdvisorResponse>('/advise/roles', { method: 'POST', body: JSON.stringify(body) });
+}
+
 export async function listTeams(
   userId: string,
   gender?: 'men' | 'women'
@@ -213,6 +252,8 @@ export interface TeamMatchResult {
     points_b: number;
     winner_id: string;
     match_id: string;
+    /** Role-triggered effects for this slot (e.g. "Aggressor bonus applied"). */
+    role_log?: Array<{ player_id: string; role: string; game_slot: number; description: string; raw_score: number; adjusted_score: number }>;
   }>;
   created_at: string;
 }
@@ -300,5 +341,222 @@ export async function explainMatch(matchId: string, userQuery?: string): Promise
   return apiRequest<ExplainResponse>('/explain/match', {
     method: 'POST',
     body: JSON.stringify({ match_id: matchId, user_query: userQuery ?? undefined }),
+  });
+}
+
+// ---------- Leagues (Step 3) ----------
+
+export interface League {
+  id: string;
+  name: string;
+  creator_user_id?: string;
+  owner_id: string;
+  status: string;
+  max_teams: number;
+  created_at: string;
+  started_at?: string | null;
+}
+
+export interface LeagueDetail extends League {
+  members?: Array<{ user_id: string; team_id: string; team_name?: string | null; joined_at: string }>;
+  current_week?: number;
+  total_weeks?: number;
+  started_at?: string | null;
+  current_week_matches?: Array<{
+    id: string;
+    home_team_id: string;
+    away_team_id: string | null;
+    status: string;
+    home_score: number;
+    away_score: number;
+  }>;
+  /** Full schedule: all weeks and matches. Present when league has been started. */
+  schedule?: Array<{
+    week_number: number;
+    week_id: string;
+    matches: Array<{
+      id: string;
+      home_team_id: string;
+      away_team_id: string | null;
+      status: string;
+      home_score: number;
+      away_score: number;
+    }>;
+  }>;
+}
+
+export interface LeagueStanding {
+  team_id: string;
+  wins: number;
+  losses: number;
+  draws: number;
+  points_for: number;
+  points_against: number;
+  differential: number;
+}
+
+/** When mine is true and user is logged in, returns only leagues the user owns or has joined. */
+export async function listLeagues(mine?: boolean): Promise<League[]> {
+  const url = mine ? '/leagues?mine=true' : '/leagues';
+  const data = await apiRequest<{ leagues: League[] }>(url);
+  return data.leagues;
+}
+
+export async function createLeague(name: string, max_teams: number): Promise<League> {
+  return apiRequest<League>('/leagues', {
+    method: 'POST',
+    body: JSON.stringify({ name, max_teams }),
+  });
+}
+
+export async function getLeague(leagueId: string): Promise<LeagueDetail> {
+  return apiRequest<LeagueDetail>(`/leagues/${leagueId}`);
+}
+
+export async function joinLeague(leagueId: string, teamId: string): Promise<{ joined: boolean }> {
+  return apiRequest<{ joined: boolean }>(`/leagues/${leagueId}/join`, {
+    method: 'POST',
+    body: JSON.stringify({ team_id: teamId }),
+  });
+}
+
+export async function startLeague(leagueId: string): Promise<{ started: boolean }> {
+  return apiRequest<{ started: boolean }>(`/leagues/${leagueId}/start`, {
+    method: 'POST',
+  });
+}
+
+export async function fastForwardWeek(leagueId: string, seed?: number): Promise<{
+  advanced: boolean;
+  current_week?: number;
+  total_weeks?: number;
+  league_completed?: boolean;
+}> {
+  return apiRequest(`/leagues/${leagueId}/fast-forward-week`, {
+    method: 'POST',
+    body: JSON.stringify(seed != null ? { seed } : {}),
+  });
+}
+
+export async function getLeagueStandings(leagueId: string): Promise<LeagueStanding[]> {
+  const data = await apiRequest<{ standings: LeagueStanding[] }>(`/leagues/${leagueId}/standings`);
+  return data.standings;
+}
+
+// ---------- League matches (Step 4: live + fast-forward) ----------
+
+export interface LeagueMatch {
+  id: string;
+  week_id: string;
+  home_team_id: string;
+  away_team_id: string | null;
+  home_team_name?: string;
+  away_team_name?: string;
+  home_score: number;
+  away_score: number;
+  status: string;
+  simulation_log?: string | null;
+  created_at: string | null;
+  live?: {
+    elapsed_seconds: number;
+    home_score: number;
+    away_score: number;
+    highlights: Array<Record<string, unknown>>;
+    done: boolean;
+    /** Per-game state (7 slots). Bootstraped when match goes live for late join. */
+    games?: Array<{
+      slot: number;
+      home_player_id: string;
+      away_player_id: string;
+      home_player_name: string;
+      away_player_name: string;
+      score_home: number;
+      score_away: number;
+      status: string;
+    }>;
+  };
+}
+
+export async function getLeagueMatch(matchId: string): Promise<LeagueMatch> {
+  return apiRequest<LeagueMatch>(`/league-matches/${matchId}`);
+}
+
+export async function startLiveLeagueMatch(matchId: string, seed?: number): Promise<{ started: boolean }> {
+  return apiRequest(`/league-matches/${matchId}/start-live`, {
+    method: 'POST',
+    body: JSON.stringify(seed != null ? { seed } : {}),
+  });
+}
+
+export async function fastForwardLeagueMatch(matchId: string, seed?: number): Promise<{
+  status: string;
+  home_score: number;
+  away_score: number;
+  highlights?: Array<Record<string, unknown>>;
+}> {
+  return apiRequest(`/league-matches/${matchId}/fast-forward`, {
+    method: 'POST',
+    body: JSON.stringify(seed != null ? { seed } : {}),
+  });
+}
+
+/** Reset a league match to scheduled (for testing). Lets you rerun live or fast-forward. */
+export async function restartLeagueMatch(matchId: string): Promise<{ status: string; restarted: boolean }> {
+  return apiRequest(`/league-matches/${matchId}/restart`, { method: 'POST' });
+}
+
+/** WebSocket URL for live league match updates (ws or wss from current origin). */
+export function leagueMatchWebSocketUrl(matchId: string): string {
+  const base = API_BASE.replace(/^http/, 'ws');
+  return `${base}/ws/league-match/${matchId}`;
+}
+
+/** Total momentum: time_seconds vs cumul_tt_home, cumul_tt_away (table tennis points). */
+export interface TotalMomentumPoint {
+  time_seconds: number;
+  cumul_tt_home: number;
+  cumul_tt_away: number;
+}
+
+/** Completed league match can include slot_data and total_momentum. */
+export interface LeagueMatchWithSlots extends LeagueMatch {
+  slot_data?: Array<Record<string, unknown>>;
+  total_momentum?: TotalMomentumPoint[];
+}
+
+/** One game (slot) data: TT momentum series, stats, player names. */
+export interface LeagueMatchGame {
+  match_id: string;
+  slot: number;
+  home_team_name: string;
+  away_team_name: string;
+  home_player_id: string;
+  away_player_id: string;
+  home_player_name: string;
+  away_player_name: string;
+  momentum_series: Array<{ point_index: number; time_seconds: number; cumul_tt_a: number; cumul_tt_b: number }>;
+  total_points: number;
+  longest_rally?: number;
+  avg_rally_length?: number;
+  serve_win_pct_a?: number;
+  serve_win_pct_b?: number;
+  player_a_stats?: Record<string, unknown>;
+  player_b_stats?: Record<string, unknown>;
+  winner_id?: string;
+}
+
+export async function getLeagueMatchGame(matchId: string, slot: number): Promise<LeagueMatchGame> {
+  return apiRequest<LeagueMatchGame>(`/league-matches/${matchId}/games/${slot}`);
+}
+
+export interface ExplainResponse {
+  explanation_text: string;
+  supporting_facts: string[];
+}
+
+export async function explainLeagueMatchGame(leagueMatchId: string, slot: number): Promise<ExplainResponse> {
+  return apiRequest<ExplainResponse>('/explain/league-match-game', {
+    method: 'POST',
+    body: JSON.stringify({ league_match_id: leagueMatchId, slot }),
   });
 }

@@ -9,7 +9,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from backend.models import User, Team, TeamPlayer, Match, TeamMatch, League, Season, Week, LeagueMatch
+from backend.models import User, Team, TeamPlayer, Match, TeamMatch, League, LeagueMember, Season, Week, LeagueMatch
 
 
 def _parse_datetime(s: str | None) -> datetime:
@@ -130,23 +130,121 @@ class LeagueRepository:
         )
 
     def get(self, conn: sqlite3.Connection, league_id: str) -> League | None:
+        cols = "id, name, owner_id, status, max_teams, created_at"
+        if _has_col(conn, "leagues", "started_at"):
+            cols += ", started_at"
         row = conn.execute(
-            "SELECT id, name, owner_id, status, max_teams, created_at FROM leagues WHERE id = ?",
+            f"SELECT {cols} FROM leagues WHERE id = ?",
             (league_id,),
         ).fetchone()
         if row is None:
             return None
+        r = dict(row)
+        started_at = _parse_datetime(r["started_at"]) if r.get("started_at") else None
         return League(
-            id=row["id"],
-            name=row["name"],
-            owner_id=row["owner_id"],
-            status=row["status"],
-            max_teams=row["max_teams"],
-            created_at=_parse_datetime(row["created_at"]),
+            id=r["id"],
+            name=r["name"],
+            owner_id=r["owner_id"],
+            status=r["status"],
+            max_teams=r["max_teams"],
+            created_at=_parse_datetime(r["created_at"]),
+            started_at=started_at,
         )
 
     def update_status(self, conn: sqlite3.Connection, league_id: str, status: str) -> None:
         conn.execute("UPDATE leagues SET status = ? WHERE id = ?", (status, league_id))
+        conn.commit()
+
+    def update_started_at(self, conn: sqlite3.Connection, league_id: str, started_at_iso: str) -> None:
+        """Set league.started_at when league is frozen (start)."""
+        if not _has_col(conn, "leagues", "started_at"):
+            return
+        conn.execute("UPDATE leagues SET started_at = ? WHERE id = ?", (started_at_iso, league_id))
+        conn.commit()
+
+    def list_all(self, conn: sqlite3.Connection) -> list[League]:
+        cols = "id, name, owner_id, status, max_teams, created_at"
+        if _has_col(conn, "leagues", "started_at"):
+            cols += ", started_at"
+        rows = conn.execute(
+            f"SELECT {cols} FROM leagues ORDER BY created_at DESC"
+        ).fetchall()
+        result: list[League] = []
+        for r in rows:
+            rd = dict(r)
+            started_at = _parse_datetime(rd["started_at"]) if rd.get("started_at") else None
+            result.append(League(
+                id=rd["id"],
+                name=rd["name"],
+                owner_id=rd["owner_id"],
+                status=rd["status"],
+                max_teams=rd["max_teams"],
+                created_at=_parse_datetime(rd["created_at"]),
+                started_at=started_at,
+            ))
+        return result
+
+
+# ---------- LeagueMemberRepository ----------
+
+
+class LeagueMemberRepository:
+    """CRUD for league_members. One team per user per league."""
+
+    def create(
+        self,
+        conn: sqlite3.Connection,
+        league_id: str,
+        user_id: str,
+        team_id: str,
+    ) -> LeagueMember:
+        now = datetime.utcnow().isoformat()
+        conn.execute(
+            "INSERT INTO league_members (league_id, user_id, team_id, joined_at) VALUES (?, ?, ?, ?)",
+            (league_id, user_id, team_id, now),
+        )
+        conn.commit()
+        return LeagueMember(
+            league_id=league_id, user_id=user_id, team_id=team_id,
+            joined_at=datetime.fromisoformat(now),
+        )
+
+    def get(self, conn: sqlite3.Connection, league_id: str, user_id: str) -> LeagueMember | None:
+        row = conn.execute(
+            "SELECT league_id, user_id, team_id, joined_at FROM league_members WHERE league_id = ? AND user_id = ?",
+            (league_id, user_id),
+        ).fetchone()
+        if row is None:
+            return None
+        r = dict(row)
+        return LeagueMember(
+            league_id=r["league_id"], user_id=r["user_id"], team_id=r["team_id"],
+            joined_at=_parse_datetime(r["joined_at"]),
+        )
+
+    def list_by_league(self, conn: sqlite3.Connection, league_id: str) -> list[LeagueMember]:
+        rows = conn.execute(
+            "SELECT league_id, user_id, team_id, joined_at FROM league_members WHERE league_id = ? ORDER BY joined_at",
+            (league_id,),
+        ).fetchall()
+        return [
+            LeagueMember(
+                league_id=r["league_id"], user_id=r["user_id"], team_id=r["team_id"],
+                joined_at=_parse_datetime(r["joined_at"]),
+            )
+            for r in rows
+        ]
+
+    def list_league_ids_by_user(self, conn: sqlite3.Connection, user_id: str) -> list[str]:
+        """League IDs where the user is a member (joined)."""
+        rows = conn.execute(
+            "SELECT league_id FROM league_members WHERE user_id = ?",
+            (user_id,),
+        ).fetchall()
+        return [r["league_id"] for r in rows]
+
+    def delete(self, conn: sqlite3.Connection, league_id: str, user_id: str) -> None:
+        conn.execute("DELETE FROM league_members WHERE league_id = ? AND user_id = ?", (league_id, user_id))
         conn.commit()
 
 
@@ -375,11 +473,42 @@ class LeagueMatchRepository:
         home_score: float,
         away_score: float,
         simulation_log: str | None = None,
+        slot_data_json: str | None = None,
     ) -> None:
-        conn.execute(
-            "UPDATE league_matches SET home_score = ?, away_score = ?, status = 'completed', simulation_log = ? WHERE id = ?",
-            (home_score, away_score, simulation_log, league_match_id),
-        )
+        if _has_col(conn, "league_matches", "slot_data") and slot_data_json is not None:
+            conn.execute(
+                "UPDATE league_matches SET home_score = ?, away_score = ?, status = 'completed', simulation_log = ?, slot_data = ? WHERE id = ?",
+                (home_score, away_score, simulation_log, slot_data_json, league_match_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE league_matches SET home_score = ?, away_score = ?, status = 'completed', simulation_log = ? WHERE id = ?",
+                (home_score, away_score, simulation_log, league_match_id),
+            )
+        conn.commit()
+
+    def update_status(self, conn: sqlite3.Connection, league_match_id: str, status: str) -> None:
+        """Update match status (scheduled | live | completed). For live simulation lifecycle."""
+        conn.execute("UPDATE league_matches SET status = ? WHERE id = ?", (status, league_match_id))
+        if status == "live" and _has_col(conn, "league_matches", "started_at"):
+            now = datetime.utcnow().isoformat()
+            conn.execute("UPDATE league_matches SET started_at = ? WHERE id = ?", (now, league_match_id))
+        conn.commit()
+
+    def reset_to_scheduled(
+        self, conn: sqlite3.Connection, league_match_id: str
+    ) -> None:
+        """Reset match to scheduled (for testing: rerun live simulation). Clears scores, log, and slot_data."""
+        if _has_col(conn, "league_matches", "slot_data"):
+            conn.execute(
+                "UPDATE league_matches SET status = 'scheduled', home_score = 0, away_score = 0, simulation_log = NULL, slot_data = NULL WHERE id = ?",
+                (league_match_id,),
+            )
+        else:
+            conn.execute(
+                "UPDATE league_matches SET status = 'scheduled', home_score = 0, away_score = 0, simulation_log = NULL WHERE id = ?",
+                (league_match_id,),
+            )
         conn.commit()
 
 
@@ -432,22 +561,31 @@ class TeamRepository:
         name: str,
         gender: str,
         budget: int,
-        roster: list[tuple[str, int, bool]],  # (player_id, slot, is_captain)
+        roster: list[tuple[str, int, bool, str | None]],  # (player_id, slot, is_captain, role)
         id: str | None = None,
         league_id: str | None = None,
     ) -> Team:
-        """Phase 2: 10 players, slots 1-7 active 8-10 bench, one captain in 1-7. Optional league_id."""
+        """Phase 2: 10 players, slots 1-7 active 8-10 bench, one captain in 1-7. Optional league_id. Optional role per slot."""
         tid = id or str(uuid.uuid4())
         now = datetime.utcnow().isoformat()
         cols, vals, args = ["id", "user_id", "name", "gender", "budget", "created_at"], ["?", "?", "?", "?", "?", "?"], [tid, user_id, name, gender, budget, now]
         if _has_col(conn, "teams", "league_id"):
             cols.append("league_id"); vals.append("?"); args.append(league_id)
         conn.execute(f"INSERT INTO teams ({', '.join(cols)}) VALUES ({', '.join(vals)})", args)
-        for pos, (pid, slot, is_captain) in enumerate(roster, start=1):
-            conn.execute(
-                "INSERT INTO team_players (team_id, player_id, position, slot, is_captain) VALUES (?, ?, ?, ?, ?)",
-                (tid, pid, pos, slot, 1 if is_captain else 0),
-            )
+        has_role = _has_col(conn, "team_players", "role")
+        for pos, item in enumerate(roster, start=1):
+            pid, slot, is_captain = item[0], item[1], item[2]
+            role = item[3] if len(item) > 3 else None
+            if has_role:
+                conn.execute(
+                    "INSERT INTO team_players (team_id, player_id, position, slot, is_captain, role) VALUES (?, ?, ?, ?, ?, ?)",
+                    (tid, pid, pos, slot, 1 if is_captain else 0, role),
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO team_players (team_id, player_id, position, slot, is_captain) VALUES (?, ?, ?, ?, ?)",
+                    (tid, pid, pos, slot, 1 if is_captain else 0),
+                )
         conn.commit()
         return Team(
             id=tid, user_id=user_id, name=name, gender=gender,
@@ -484,28 +622,36 @@ class TeamRepository:
 
     def get_players_with_slots(
         self, conn: sqlite3.Connection, team_id: str
-    ) -> list[tuple[str, int, bool]]:
-        """Phase 2: (player_id, slot, is_captain) ordered by position."""
+    ) -> list[tuple[str, int, bool, str | None]]:
+        """Phase 2: (player_id, slot, is_captain, role) ordered by position. role is None when column absent or unset."""
         if not _has_col(conn, "team_players", "slot"):
             ids = self.get_players(conn, team_id)
-            return [(pid, i, False) for i, pid in enumerate(ids, start=1)]
-        rows = conn.execute(
-            "SELECT player_id, slot, is_captain FROM team_players WHERE team_id = ? ORDER BY position",
-            (team_id,),
-        ).fetchall()
-        return [(r["player_id"], r["slot"], bool(r["is_captain"])) for r in rows]
+            return [(pid, i, False, None) for i, pid in enumerate(ids, start=1)]
+        has_role = _has_col(conn, "team_players", "role")
+        sel = "SELECT player_id, slot, is_captain" + (", role" if has_role else "") + " FROM team_players WHERE team_id = ? ORDER BY position"
+        rows = conn.execute(sel, (team_id,)).fetchall()
+        if has_role:
+            return [(r["player_id"], r["slot"], bool(r["is_captain"]), r["role"]) for r in rows]
+        return [(r["player_id"], r["slot"], bool(r["is_captain"]), None) for r in rows]
 
     def get_active_player_ids(self, conn: sqlite3.Connection, team_id: str) -> list[str]:
         """Phase 2: player_ids for slots 1-7 only."""
         with_slots = self.get_players_with_slots(conn, team_id)
-        return [pid for pid, slot, _ in with_slots if 1 <= slot <= 7]
+        return [pid for pid, slot, *_ in with_slots if 1 <= slot <= 7]
+
+    def get_active_roster_with_roles(
+        self, conn: sqlite3.Connection, team_id: str
+    ) -> list[tuple[str, str | None]]:
+        """(player_id, role) for slots 1-7 in order. Used by simulation for role handler."""
+        with_slots = self.get_players_with_slots(conn, team_id)
+        return [(r[0], r[3] if len(r) > 3 else None) for r in with_slots if 1 <= r[1] <= 7]
 
     def get_captain_id(self, conn: sqlite3.Connection, team_id: str) -> str | None:
         """Phase 2: player_id who is captain."""
         with_slots = self.get_players_with_slots(conn, team_id)
-        for pid, _, is_captain in with_slots:
-            if is_captain:
-                return pid
+        for r in with_slots:
+            if r[2]:  # is_captain
+                return r[0]
         return None
 
     def list_by_user(self, conn: sqlite3.Connection, user_id: str) -> list[Team]:
@@ -518,18 +664,22 @@ class TeamRepository:
             f"SELECT {cols} FROM teams WHERE user_id = ? ORDER BY created_at",
             (user_id,),
         ).fetchall()
-        return [
-            Team(
-                id=r["id"],
-                user_id=r["user_id"],
-                name=r["name"],
-                gender=r["gender"] if "gender" in r.keys() else "men",
-                created_at=_parse_datetime(r["created_at"]),
-                budget=r.get("budget"),
-                league_id=r.get("league_id") if _has_col(conn, "teams", "league_id") else None,
+        has_league = _has_col(conn, "teams", "league_id")
+        result = []
+        for r in rows:
+            d = dict(r)
+            result.append(
+                Team(
+                    id=d["id"],
+                    user_id=d["user_id"],
+                    name=d["name"],
+                    gender=d.get("gender") or "men",
+                    created_at=_parse_datetime(d["created_at"]),
+                    budget=d.get("budget"),
+                    league_id=d.get("league_id") if has_league else None,
+                )
             )
-            for r in rows
-        ]
+        return result
 
     def get_by_league_and_user(self, conn: sqlite3.Connection, league_id: str, user_id: str) -> Team | None:
         """One team per user per league. Returns None if no team in that league."""
@@ -559,15 +709,18 @@ class TeamRepository:
             f"SELECT {cols} FROM teams WHERE league_id = ? ORDER BY created_at",
             (league_id,),
         ).fetchall()
-        return [
-            Team(
-                id=r["id"], user_id=r["user_id"], name=r["name"],
-                gender=r["gender"] if r.get("gender") else "men",
-                created_at=_parse_datetime(r["created_at"]),
-                budget=r.get("budget"), league_id=r.get("league_id"),
+        result = []
+        for r in rows:
+            d = dict(r)
+            result.append(
+                Team(
+                    id=d["id"], user_id=d["user_id"], name=d["name"],
+                    gender=d.get("gender") or "men",
+                    created_at=_parse_datetime(d["created_at"]),
+                    budget=d.get("budget"), league_id=d.get("league_id"),
+                )
             )
-            for r in rows
-        ]
+        return result
 
 
 # ---------- TeamMatchRepository (Phase 2) ----------

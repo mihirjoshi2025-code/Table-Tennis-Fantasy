@@ -59,6 +59,7 @@ export default function TeamSummary() {
                 <th>Slot</th>
                 <th>Player</th>
                 <th>Captain</th>
+                <th>Role</th>
                 <th>Last match points</th>
               </tr>
             </thead>
@@ -71,11 +72,13 @@ export default function TeamSummary() {
                   r.last_match_points != null && r.last_match_points !== undefined
                     ? String(r.last_match_points)
                     : '--';
+                const roleLabel = r.role ? r.role.charAt(0).toUpperCase() + r.role.slice(1) : '—';
                 return (
                   <tr key={r.player_id}>
                     <td>{r.slot}</td>
                     <td>{name}{country}</td>
                     <td>{r.is_captain ? 'Yes' : '—'}</td>
+                    <td title={r.role ?? undefined}>{roleLabel}</td>
                     <td>{points}</td>
                   </tr>
                 );

@@ -18,15 +18,15 @@ from backend.services.simulation_service import run_team_match_simulation
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
-def _make_phase2_roster_7_active(player_ids: list[str], captain_index: int = 0) -> list[tuple[str, int, bool]]:
-    """Roster: slots 1-7 active, 8-10 bench; one captain in 1-7."""
-    roster = []
+def _make_phase2_roster_7_active(player_ids: list[str], captain_index: int = 0) -> list[tuple[str, int, bool, str | None]]:
+    """Roster: slots 1-7 active, 8-10 bench; one captain in 1-7; no roles."""
+    roster: list[tuple[str, int, bool, str | None]] = []
     for i, pid in enumerate(player_ids[:10]):
         slot = i + 1
         is_captain = i == captain_index and slot <= 7
-        roster.append((pid, slot, is_captain))
+        roster.append((pid, slot, is_captain, None))
     while len(roster) < 10:
-        roster.append((player_ids[-1], len(roster) + 1, False))
+        roster.append((player_ids[-1], len(roster) + 1, False, None))
     return roster[:10]
 
 

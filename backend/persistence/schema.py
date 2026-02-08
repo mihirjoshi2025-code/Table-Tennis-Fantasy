@@ -33,6 +33,24 @@ def leagues_schema() -> str:
     """
 
 
+def league_members_schema() -> str:
+    """Join table: one team per user per league. league_id, user_id, team_id."""
+    return """
+    CREATE TABLE IF NOT EXISTS league_members (
+        league_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        team_id TEXT NOT NULL,
+        joined_at TEXT NOT NULL,
+        PRIMARY KEY (league_id, user_id),
+        FOREIGN KEY (league_id) REFERENCES leagues(id),
+        FOREIGN KEY (user_id) REFERENCES users(id),
+        FOREIGN KEY (team_id) REFERENCES teams(id)
+    );
+    CREATE INDEX IF NOT EXISTS ix_league_members_league ON league_members(league_id);
+    CREATE INDEX IF NOT EXISTS ix_league_members_user ON league_members(user_id);
+    """
+
+
 def seasons_schema() -> str:
     """One season per league. Owns current_week and total_weeks."""
     return """
@@ -111,7 +129,9 @@ def team_matches_schema() -> str:
 
 
 def teams_schema() -> str:
-    """Teams belong to a league. One team per user per league. league_id added via migration for existing DBs."""
+    """Teams belong to a league. One team per user per league. league_id added via migration for existing DBs.
+    Indexes on league_id are created in migration only, so existing DBs (teams without league_id) don't fail on script run.
+    """
     return """
     CREATE TABLE IF NOT EXISTS teams (
         id TEXT PRIMARY KEY,
@@ -124,12 +144,11 @@ def teams_schema() -> str:
         FOREIGN KEY (user_id) REFERENCES users(id),
         FOREIGN KEY (league_id) REFERENCES leagues(id)
     );
-    CREATE UNIQUE INDEX IF NOT EXISTS ix_teams_league_user ON teams(league_id, user_id) WHERE league_id IS NOT NULL;
-    CREATE INDEX IF NOT EXISTS ix_teams_league ON teams(league_id);
     """
 
 
 def team_players_schema() -> str:
+    """team_players: slot, is_captain, role (nullable). Role only for active slots 1-7."""
     return """
     CREATE TABLE IF NOT EXISTS team_players (
         team_id TEXT NOT NULL,
@@ -137,6 +156,7 @@ def team_players_schema() -> str:
         position INTEGER NOT NULL,
         slot INTEGER,
         is_captain INTEGER NOT NULL DEFAULT 0,
+        role TEXT,
         PRIMARY KEY (team_id, player_id),
         FOREIGN KEY (team_id) REFERENCES teams(id),
         FOREIGN KEY (player_id) REFERENCES players(id)
@@ -173,11 +193,12 @@ def matches_schema() -> str:
 
 
 def all_schema_sql() -> str:
-    """Combine all schema DDL for a single execution. Order: users, leagues, teams, seasons, weeks, league_matches, team_players, matches, team_matches."""
+    """Combine all schema DDL. Order: users, leagues, teams, league_members, seasons, weeks, league_matches, ..."""
     return "\n".join([
         users_schema(),
         leagues_schema(),
         teams_schema(),
+        league_members_schema(),
         seasons_schema(),
         weeks_schema(),
         league_matches_schema(),

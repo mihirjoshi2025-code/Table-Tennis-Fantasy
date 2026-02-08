@@ -90,10 +90,12 @@ def test_league_status_invalid_transition_open_to_completed(db_conn, league_serv
     assert "open" in str(exc_info.value).lower() or "invalid" in str(exc_info.value).lower()
 
 
-def test_league_status_invalid_transition_open_to_active(db_conn, league_service, league_and_season):
+def test_league_status_valid_transition_open_to_active(db_conn, league_service, league_and_season):
+    """Open -> active is allowed when starting the league (skip locked)."""
     league, _ = league_and_season
-    with pytest.raises(LeagueTransitionError):
-        league_service.transition_league_status(db_conn, league.id, LeagueStatus.ACTIVE)
+    league_service.transition_league_status(db_conn, league.id, LeagueStatus.ACTIVE)
+    updated = league_service._league_repo.get(db_conn, league.id)
+    assert updated is not None and updated.status == LeagueStatus.ACTIVE
 
 
 def test_league_status_invalid_transition_completed_to_active(db_conn, league_service, league_and_season):
