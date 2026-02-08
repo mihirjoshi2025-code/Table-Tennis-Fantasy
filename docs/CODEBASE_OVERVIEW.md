@@ -6,12 +6,16 @@ High-level, comprehensive overview of the project: architecture, features, and c
 
 ## 1. Project Summary
 
-**Table Tennis Fantasy** is a backend for a table tennis fantasy and match-simulation web app. It provides:
+**Table Tennis Fantasy** is a full-stack table tennis fantasy and match-simulation web app. It provides:
 
 - **Deterministic match simulation** — point-by-point table tennis matches with configurable seed for replay.
 - **Fantasy scoring** — rubric-based scoring from match events (sets, point differential, clutch, style).
-- **REST API** — players, teams, match simulation, match retrieval, analytics, and LLM-based explanations.
-- **SQLite persistence** — users, teams, team_players, matches (with serialized events).
+- **REST API** — players, teams, match simulation (single and team-vs-team), match retrieval, analytics, and LLM-based explanations.
+- **Phase 2 auth** — hashed passwords (pbkdf2_sha256), JWT; no OAuth. Passwords never stored in plain text.
+- **Phase 2 team creation** — roster of 10 (7 active, 3 bench), one captain for bonus scoring, budget constraint (default 1000). Player salaries are computed from rank and ITTF points (dynamic pricing), not a fixed step per rank.
+- **Team match simulation** — 7v7 head-to-head with captain bonus; results and highlights per slot; team_matches table and TeamMatchRepository.
+- **SQLite persistence** — users, teams, team_players, matches, team_matches (with serialized events where applicable).
+- **Frontend** — Home page (landing, links, LLM copy), Create Team (Phase 2), Simulate Match, Login/Signup, Team Summary; same palette (dark theme, lime primary, amber secondary).
 - **Read-only LLM explanations** — agentic RAG pipeline that explains match outcomes using analytics and match data only; no simulation or persistence writes.
 
 **Invariants:** Simulation and scoring are pure, deterministic, and have no DB/API/AI dependencies. The LLM layer sits above analytics and never influences simulation, scoring, or core tables.
@@ -163,16 +167,17 @@ sequenceDiagram
 ```
 Table-Tennis-Fantasy-1/
 ├── backend/
-│   ├── api.py                 # FastAPI app, all HTTP endpoints
+│   ├── api.py                 # FastAPI app, all HTTP endpoints (incl. signup, login, simulate/team-match)
+│   ├── auth.py                # Phase 2: password hashing (pbkdf2_sha256), JWT create/decode
 │   ├── analytics.py            # Deterministic match analytics (no LLM)
-│   ├── models.py               # User, Team, TeamPlayer, Match (dataclasses)
-│   ├── rankings_db.py          # Players table + ProfileStore adapter
+│   ├── models.py               # User, Team, TeamPlayer, TeamMatch, Match (dataclasses)
+│   ├── rankings_db.py          # Players table + ProfileStore; salary from rank+points (50–180)
 │   ├── scoring.py              # Fantasy scoring (aggregate_stats, compute_fantasy_score)
 │   ├── run_live_match.py       # CLI/script for running a match
 │   ├── persistence/
-│   │   ├── db.py               # get_connection, init_db, set_db_path
-│   │   ├── schema.py           # DDL (users, teams, team_players, matches)
-│   │   └── repositories.py     # UserRepository, TeamRepository, MatchRepository
+│   │   ├── db.py               # get_connection, init_db, set_db_path, Phase 2 migrations
+│   │   ├── schema.py           # DDL (users, teams, team_players, matches, team_matches)
+│   │   └── repositories.py     # UserRepository, TeamRepository, MatchRepository, TeamMatchRepository
 │   ├── simulation/            # Core simulation (deterministic, no I/O)
 │   │   ├── orchestrator.py     # MatchOrchestrator, sets_to_win_match
 │   │   ├── point_simulator.py  # Point outcome sampling
@@ -199,6 +204,12 @@ Table-Tennis-Fantasy-1/
 │   ├── BACKEND_DESIGN.md      # Data models, API, vertical slice
 │   ├── CONTRACTS.md           # Layer contracts, AI boundaries
 │   └── CODEBASE_OVERVIEW.md  # This file
+├── frontend/                   # React (Vite) SPA
+│   ├── src/
+│   │   ├── App.tsx             # Routes: Home, Create Team, Create Team Phase 2, Simulate, Login, Signup, Team Summary
+│   │   ├── api.ts              # Centralized API client; auth in localStorage; apiRequest with Bearer token
+│   │   └── pages/              # Home, CreateTeam, CreateTeamPhase2, SimulateMatch, Login, Signup, TeamSummary
+│   └── package.json
 ├── scripts/
 │   ├── vertical_slice.py      # Create teams → simulate → persist → retrieve
 │   └── try_explain.py         # API script: create match, GET analytics, POST explain
@@ -227,24 +238,29 @@ Table-Tennis-Fantasy-1/
 
 ### 4.3 Persistence (`backend.persistence`)
 
-- **Purpose:** SQLite CRUD for users, teams, team_players, matches.
-- **Repositories:** UserRepository (create, get, list_all), TeamRepository (create, get, get_players, list_by_user), MatchRepository (create, get, list_recent).
-- **Schema:** users, teams, team_players, matches; matches store `events_json` (serialized point events).
+- **Purpose:** SQLite CRUD for users, teams, team_players, matches, team_matches.
+- **Repositories:** UserRepository (create, get, list_all), TeamRepository (create, get, get_players, list_by_user), MatchRepository (create, get, list_recent), TeamMatchRepository (create, get).
+- **Schema:** users (username, password_hash in Phase 2), teams (budget), team_players (slot, is_captain), matches, team_matches (team_a_id, team_b_id, score_a, score_b, captain_a_id, captain_b_id).
+- **Migrations:** Phase 2 migrations in db.py add username/password_hash to users, budget to teams, slot/is_captain to team_players, salary to players (backfill from rank when column added).
 - **Invariant:** No business logic; repositories accept `conn` and perform only DB operations.
 
 ### 4.4 Rankings DB & Profile Adapter (`backend.rankings_db`)
 
 - **Purpose:** Load players from `data/rankings.json` into `players` table; build `ProfileStore` for simulation (PlayerProfile per player).
+- **Salary (Phase 2):** `_salary_from_rank_and_points(rank, points)` — dynamic pricing from ITTF rank and points (range 50–180). Used in load_rankings_into_db and as fallback when salary column is missing in get_player / list_players_by_gender.
 - **Key functions:** `get_player(conn, player_id)`, `list_players_by_gender(conn, gender, limit)`, `build_profile_store_for_match(conn, player_a_id, player_b_id)`.
 - **Invariant:** ProfileStore is consumed only by MatchOrchestrator; no persistence logic inside simulation.
 
 ### 4.5 API Layer (`backend.api`)
 
 - **Endpoints:**
-  - `GET /players` — list players (optional gender, limit).
-  - `POST /teams` — create team (user_id, name, player_ids).
-  - `GET /teams/{id}` — get team with players.
-  - `POST /simulate/match` — simulate match between two teams (first player per team), persist, return match + fantasy_scores.
+  - `POST /signup`, `POST /login` — Phase 2 auth; return user_id, username, token (JWT).
+  - `GET /players` — list players (optional gender, limit); includes salary.
+  - `POST /teams` — create team. Legacy: user_id, name, gender, player_ids. Phase 2: name, gender, budget, roster (player_id, slot, is_captain); optional user_id for tests; JWT for logged-in user.
+  - `GET /teams/{id}` — get team with players/roster.
+  - `GET /teams?user_id=...` — list teams for user.
+  - `POST /simulate/match` — simulate single match between two teams (first player per team), persist, return match + fantasy_scores.
+  - `POST /simulate/team-match` — Phase 2: 7v7 team match (7 active slots, captain bonus), persist team_match and individual matches, return score_a, score_b, highlights, match_ids.
   - `GET /matches/{id}` — get match by ID (includes events if stored).
   - `GET /analysis/match/{id}` — deterministic analytics (outcome, player stats, fantasy_scores); no LLM.
   - `POST /explain/match` — LLM explanation (match_id, optional user_query) → explanation_text, supporting_facts; stub if no OPENAI_API_KEY.
@@ -291,6 +307,13 @@ Table-Tennis-Fantasy-1/
 - **Simulation & scoring:** No imports of persistence, rankings_db, or API; receive data via arguments; deterministic and pure.
 - **Persistence:** CRUD only; no business logic; repositories take `conn` and use parameterized SQL.
 - **Explanation (AI):** Reads only (match/analytics/players/rules); never calls simulation or scoring; never writes to core tables; LLM output is advisory; stub when no API key.
+
+### 6.1 Phase 2 Design Choices
+
+- **Auth:** pbkdf2_sha256 (no bcrypt) to avoid backend init issues; JWT with sub = user id; no OAuth.
+- **Roster:** 10 slots (1–7 active, 8–10 bench); exactly one captain in slots 1–7; captain bonus applied in team match scoring.
+- **Budget:** Default 1000 in UI; total roster salary must not exceed budget. Salary computed from rank and ITTF points (50–180), not a fixed step per rank.
+- **Frontend:** Home at `/` with links to Create Team and Simulate Match; same palette (dark bg, lime primary, amber secondary); auth token in localStorage; API client sends Bearer token when present.
 
 ---
 

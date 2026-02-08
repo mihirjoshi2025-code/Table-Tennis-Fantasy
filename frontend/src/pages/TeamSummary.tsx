@@ -15,7 +15,7 @@ export default function TeamSummary() {
     setError(null);
     getTeam(teamId)
       .then(setTeam)
-      .catch((e) => setError(e.message))
+      .catch((e) => setError(e instanceof Error ? e.message : String(e)))
       .finally(() => setLoading(false));
   }, [teamId]);
 
@@ -32,32 +32,72 @@ export default function TeamSummary() {
       <div className="card">
         <h1>Team</h1>
         <p className="error">{error ?? 'Team not found.'}</p>
-        <Link to="/" className="nav-link">← Back to Create Team</Link>
+        <Link to="/teams" className="nav-link">← View Team</Link>
       </div>
     );
   }
 
   const players = team.players ?? [];
+  const roster = team.roster ?? [];
   const created = team.created_at ? new Date(team.created_at).toLocaleString() : '—';
+  const playerById = Object.fromEntries(players.map((p) => [p.id, p]));
 
   return (
     <div className="card">
       <h1>{team.name}</h1>
       <p className="team-summary-meta">
         Gender: {team.gender} · Created: {created}
-      </p>
-      <p className="team-summary-meta" style={{ marginBottom: '1rem' }}>
-        Team saved. Data round-trip confirmed.
+        {team.budget != null ? ` · Budget: ${team.budget}` : ''}
       </p>
 
-      <h2>Players ({players.length})</h2>
-      <ul className="team-summary-list">
-        {players.map((p, i) => (
-          <li key={p.id}>
-            {i + 1}. {p.name ?? p.id} {p.country ? `(${p.country})` : ''}
-          </li>
-        ))}
-      </ul>
+      {roster.length > 0 ? (
+        <>
+          <h2>Roster</h2>
+          <table className="roster-table">
+            <thead>
+              <tr>
+                <th>Slot</th>
+                <th>Player</th>
+                <th>Captain</th>
+                <th>Role</th>
+                <th>Last match points</th>
+              </tr>
+            </thead>
+            <tbody>
+              {roster.map((r) => {
+                const p = playerById[r.player_id];
+                const name = p?.name ?? r.player_id;
+                const country = p?.country ? ` (${p.country})` : '';
+                const points =
+                  r.last_match_points != null && r.last_match_points !== undefined
+                    ? String(r.last_match_points)
+                    : '--';
+                const roleLabel = r.role ? r.role.charAt(0).toUpperCase() + r.role.slice(1) : '—';
+                return (
+                  <tr key={r.player_id}>
+                    <td>{r.slot}</td>
+                    <td>{name}{country}</td>
+                    <td>{r.is_captain ? 'Yes' : '—'}</td>
+                    <td title={r.role ?? undefined}>{roleLabel}</td>
+                    <td>{points}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </>
+      ) : (
+        <>
+          <h2>Players ({players.length})</h2>
+          <ul className="team-summary-list">
+            {players.map((p, i) => (
+              <li key={p.id}>
+                {i + 1}. {p.name ?? p.id} {p.country ? `(${p.country})` : ''}
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
 
       <button
         type="button"
@@ -68,7 +108,9 @@ export default function TeamSummary() {
         Back
       </button>
       <p style={{ marginTop: '1rem' }}>
-        <Link to="/" className="nav-link">Create another team</Link>
+        <Link to="/teams" className="nav-link">View all teams</Link>
+        {' · '}
+        <Link to="/create-phase2" className="nav-link">Create another team</Link>
       </p>
     </div>
   );
